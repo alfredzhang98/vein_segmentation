@@ -1,0 +1,11 @@
+# avoid dcm files
+*.dcm
+
+# Mac OS specific files
+.DS_Store
+
+# Python cache files
+__pycache__/
+
+# zip files
+*.zip

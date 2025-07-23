@@ -9,3 +9,9 @@ __pycache__/
 
 # zip files
 *.zip
+
+# ignore pth
+*.pth
+
+# ignore png files
+*.png

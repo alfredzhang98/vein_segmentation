@@ -109,7 +109,7 @@ class ScannerWindow(Qt3DExtras.Qt3DWindow):
         self.scannerEntity = Qt3DCore.QEntity(self.rootEntity)
         # QSceneLoader loads materials from scanner.mtl referenced in scanner.obj
         self.scanner = Qt3DRender.QSceneLoader(self.scannerEntity)
-        self.scanner.setSource(QUrl.fromLocalFile("scanner.obj"))
+        self.scanner.setSource(QUrl.fromLocalFile("3Dmodel/scanner.obj"))
         self.scannerEntity.addComponent(self.scanner)
         self.addTransform()
 

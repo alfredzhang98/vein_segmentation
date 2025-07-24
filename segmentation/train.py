@@ -230,7 +230,7 @@ def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, cf
     run = None
     if cfg.get("wandb_enable", True):
         mode = os.environ.get("WANDB_MODE", "online")
-        run = wandb.init(wandb_entity=cfg["wandb_entity"], project=cfg["wandb_project_name"], config = {
+        run = wandb.init(entity=cfg["wandb_entity"], project=cfg["wandb_project_name"], config = {
             "learning_rate": cfg["learning_rate"],
             "batch_size": cfg["batch_size"],
             "architecture": "UNet",

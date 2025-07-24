@@ -83,12 +83,6 @@ class DatasetSizeMap(Dataset):
 
         return image, mask
     
-def denorm(img, mean=(0.5,0.5,0.5), std=(0.5,0.5,0.5)):
-    # img: [C,H,W]
-    mean = torch.tensor(mean).view(3,1,1)
-    std  = torch.tensor(std).view(3,1,1)
-    return img * std + mean
-
 def unpack(batch):
     if isinstance(batch, dict):
         return batch['image'], batch['mask']
@@ -128,15 +122,6 @@ if __name__ == "__main__":
 
     debug_data_range(train_data, "Train")
     debug_data_range(val_loader, "Validation")
-
-    # image_vis = denorm(image).permute(1,2,0).cpu().numpy()
-    # mask_vis  = mask.squeeze().cpu().numpy()
-
-    # plt.figure(figsize=(10,4))
-    # plt.subplot(1,2,1); plt.imshow(image_vis); plt.title("Image"); plt.axis('off')
-    # plt.subplot(1,2,2); plt.imshow(mask_vis, cmap='gray'); plt.title("Mask"); plt.axis('off')
-    # plt.tight_layout()
-    # plt.show()
 
     # 数据加载
     # train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=4)

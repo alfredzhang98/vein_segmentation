@@ -1,7 +1,10 @@
-learning pytorch form this [link](https://github.com/lucidrains)
-learning unet pytorch [link](https://github.com/milesial/Pytorch-UNet)
+Learning pytorch form this [link](https://github.com/lucidrains)
+
+Learning unet pytorch [link](https://github.com/milesial/Pytorch-UNet)
 
 # Introduction of Unet Segmentation
+
+Dataset and trained model files: [Google Drive](https://drive.google.com/drive/folders/1K7I51N4xtgEfaKAJtppvmrK9fP8AfKHu?usp=drive_link)
 
 ## Data Collection
 

@@ -4,27 +4,22 @@ Pure training script built on top of your existing code (train/val loaders alrea
 - 仅包含训练 + 验证（用于监控 loss/dice），没有推理/测试部分。
 - 支持 binary 或 multi-class（设定 CONFIG['num_classes']）。
 - 默认使用 AdamW、BCE/CrossEntropy + DiceLoss、AMP、梯度裁剪与简单的 ReduceLROnPlateau 调度器。
-- 可选 wandb 记录；不想用就把 USE_WANDB=False。
+- 可选 wandb 记录；不想用就把 wandb_enable=False。
 
 把此文件放在你已有的数据准备代码后面或单独保存再 import 那段代码，直接运行即可。
 """
 import os
+import re
 import math
-import random
-import numpy as np
 import pandas as pd
-from PIL import Image
 from pathlib import Path
 from sklearn.model_selection import train_test_split
-import matplotlib.pyplot as plt
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 import torch.nn.functional as F
-from torch.amp import GradScaler, autocast
-from torch.utils.data import Dataset, DataLoader
-from torchvision import transforms
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 import albumentations as A
@@ -41,31 +36,35 @@ from unet import UNet
 # ----------------------------------------------------------------------------------
 CONFIG: Dict[str, Any] = {
     "epochs": 100,                                      # total epochs
+    "early_stop_patience": 15,                          # e.g. 15 or None to disable
+    ## learning rate & scheduler
     "learning_rate": 1e-4,
-    "batch_size": 8,                                   # batch size per GPU
-    "weight_decay": 1e-5,                               # weight decay for optimizer
-    "optimizer": "adamw",                               # adam | adamw | rmsprop | sgd
-    "momentum": 0.9,                                    # only for rmsprop/sgd
-    "gradient_clip": 1.0,
-    "amp": True,
-    "num_classes": 1,                                   # 1 -> binary, >1 -> multiclass
-    "bilinear": False,
-    "threshold": 0.5,                                   # for binary dice/iou
-    "checkpoint_dir": "outputs/checkpoints",
-    "resume_path": None,                                # path to .pth to resume, or None
     "scheduler": "plateau",                             # none | plateau | cosine
     "plateau_mode": "max",                              # max for dice
     "plateau_patience": 5,
     "cosine_Tmax": 50,
-    "early_stop_patience": None,                        # e.g. 15 or None to disable
+    "amp": True,
+    ## model
+    "batch_size": 16,                                   # batch size per GPU
+    "n_channels": 1,                                    # input channels, e.g. 1 for grayscale
+    "num_classes": 1,                                   # 1 -> binary, >1 -> multiclass
+    ## training and optimizer
+    "optimizer": "adamw",                               # adam | adamw | rmsprop | sgd
+    "weight_decay": 1e-5,                               # weight decay for optimizer
+    "momentum": 0.9,                                    # only for rmsprop/sgd
+    "gradient_clip": 1.0,
+    "bilinear": False,                                  # use bilinear upsampling in UNet
+    ## wandb config
+    "wandb_entity": "worldangle",                       # wandb wandb_entity
+    "wandb_project_name": "us-segmentation",            # wandb project
+    "wandb_enable": True,
     "log_histograms": False,
-    "entity": "worldangle",                             # wandb entity
-    "project_name": "us-segmentation",                  # wandb project
-    "use_wandb": True,
-    "best_ckpt_name": "best_model.pth",
+    ## checkpoint config
+    "checkpoint_dir": "outputs/checkpoints",
+    "resume_path": None,                                # path to .pth to resume, or None
 }
 
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cuda:8" if torch.cuda.is_available() else "cpu")
 
 # ----------------------------------------------------------------------------------
 #                               LOSS & METRICS
@@ -73,49 +72,65 @@ DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 @torch.no_grad()
 def dice_coeff(prob: torch.Tensor, target: torch.Tensor, eps: float = 1e-6, multiclass: bool = False) -> torch.Tensor:
-    if not multiclass:  # prob/target: (N,1,H,W)
+    if not multiclass:  
+        # prob/target: (N,1,H,W)
         intersection = (prob * target).sum(dim=(2, 3))
         union = prob.sum(dim=(2, 3)) + target.sum(dim=(2, 3))
         dice = (2. * intersection + eps) / (union + eps)
         return dice.mean()
-    else:               # one-hot both: (N,C,H,W)
+    else:               
+        # one-hot both: (N,C,H,W)
         intersection = (prob * target).sum(dim=(2, 3))
         union = prob.sum(dim=(2, 3)) + target.sum(dim=(2, 3))
         dice = (2. * intersection + eps) / (union + eps)
         return dice.mean()
-
 
 def dice_loss_from_logits(logits: torch.Tensor, target: torch.Tensor, multiclass: bool) -> torch.Tensor:
     if multiclass:
         probs = F.softmax(logits, dim=1)
+        # check the one_hot whether already has the right channel order (N,C,H,W)
         tgt_1h = F.one_hot(target, num_classes=logits.shape[1]).permute(0, 3, 1, 2).float()
         return 1 - dice_coeff(probs, tgt_1h, multiclass=True)
     else:
         probs = torch.sigmoid(logits)
         return 1 - dice_coeff(probs, target.float(), multiclass=False)
 
-
+# for the validation stage we do not need to store gradients so we use torch.no_grad()
 @torch.no_grad()
 def validate(model: nn.Module, loader: DataLoader, cfg: Dict[str, Any]) -> Tuple[float, float]:
-    model.eval()
+    model.eval()  # 切换模型到评估模式，关闭 Dropout、BatchNorm 等训练专用行为
+    # 累积指标：总 dice、总 loss、样本总数
     total_dice, total_loss, n = 0.0, 0.0, 0
+    # 根据任务类型选用二分类或多分类交叉熵损失
     criterion = nn.BCEWithLogitsLoss() if cfg["num_classes"] == 1 else nn.CrossEntropyLoss()
     for batch in loader:
-        imgs, masks = unpack(batch)
+        imgs, masks = DatasetSizeMap.unpack(batch)
+        # 将 C 通道 存储在最后一个维度 torch.channels_last
+        # 由于模型还在cuda 上，所以需要将数据也转移到cuda上 以便于validation
+        # 必须先做 imgs = imgs.to(DEVICE)，把图像张量搬到 GPU，才能进行后面的前向/反向计算。
         imgs = imgs.to(DEVICE, dtype=torch.float32, memory_format=torch.channels_last)
         if cfg["num_classes"] == 1:
             masks = masks.to(DEVICE, dtype=torch.float32)
         else:
             masks = masks.to(DEVICE, dtype=torch.long)
+        # 默认cuda 如果 apple mps 就有 cpu
         with torch.autocast(DEVICE.type if DEVICE.type != 'mps' else 'cpu', enabled=cfg["amp"]):
-            logits = model(imgs)
+            logits = model(imgs) # 前向计算，得到 raw logits
+
+            # 计算 dice loss 
             if cfg["num_classes"] == 1:
+                # squeeze 维度以匹配 BCEWithLogitsLoss 需要的 (N, H, W)
+                # logits.shape == (N, 1, H, W) -> (N, H, W) by squeeze(1) squeeze the channel dimension
+                # masks.shape == (N, 1, H, W) -> (N, H, W) by squeeze(1) squeeze the channel dimension
                 ce = criterion(logits.squeeze(1), masks.squeeze(1))
                 dsc = dice_loss_from_logits(logits, masks, multiclass=False)
             else:
                 ce = criterion(logits, masks)
                 dsc = dice_loss_from_logits(logits, masks, multiclass=True)
+            # 计算总损失
             loss = ce + dsc
+
+            # 计算 dice 系数 计算指标，不参与梯度 越接近 1 表示重叠越好
             if cfg["num_classes"] == 1:
                 probs = torch.sigmoid(logits)
                 dice = dice_coeff(probs, masks.float(), multiclass=False)
@@ -123,17 +138,15 @@ def validate(model: nn.Module, loader: DataLoader, cfg: Dict[str, Any]) -> Tuple
                 probs = F.softmax(logits, dim=1)
                 masks_1h = F.one_hot(masks, num_classes=cfg["num_classes"]).permute(0,3,1,2).float()
                 dice = dice_coeff(probs, masks_1h, multiclass=True)
+
+        # 当前 batch 大小
         bs = imgs.size(0)
+        # 累加当前 batch 的损失和 dice
         total_loss += loss.item() * bs
         total_dice += dice.item() * bs
         n += bs
+    # 计算平均损失和 loss dice 返回
     return total_loss / n, total_dice / n
-
-
-def unpack(batch):
-    if isinstance(batch, dict):
-        return batch['image'], batch['mask']
-    return batch[0], batch[1]
 
 # ----------------------------------------------------------------------------------
 #                                   TRAIN LOOP
@@ -141,34 +154,68 @@ def unpack(batch):
 
 
 def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, cfg: Dict[str, Any]):
-    # Optimizer
+    # --- 优化器（Optimizer）设置 ---
     opt_name = cfg["optimizer"].lower()
     if opt_name == "adam":
-        optimizer = optim.Adam(model.parameters(), lr=cfg["learning_rate"], weight_decay=cfg["weight_decay"], foreach=True)
+        optimizer = optim.Adam(
+            model.parameters(),
+            lr=cfg["learning_rate"],
+            weight_decay=cfg["weight_decay"],
+            foreach=True
+        )
     elif opt_name == "adamw":
-        optimizer = optim.AdamW(model.parameters(), lr=cfg["learning_rate"], weight_decay=cfg["weight_decay"], foreach=True)
+        optimizer = optim.AdamW(
+            model.parameters(),
+            lr=cfg["learning_rate"],
+            weight_decay=cfg["weight_decay"],
+            foreach=True
+        )
     elif opt_name == "rmsprop":
-        optimizer = optim.RMSprop(model.parameters(), lr=cfg["learning_rate"], weight_decay=cfg["weight_decay"], momentum=cfg["momentum"], foreach=True)
+        optimizer = optim.RMSprop(
+            model.parameters(),
+            lr=cfg["learning_rate"],
+            weight_decay=cfg["weight_decay"],
+            momentum=cfg["momentum"],
+            foreach=True
+        )
     elif opt_name == "sgd":
-        optimizer = optim.SGD(model.parameters(), lr=cfg["learning_rate"], momentum=cfg["momentum"], weight_decay=cfg["weight_decay"], nesterov=True)
+        optimizer = optim.SGD(
+            model.parameters(),
+            lr=cfg["learning_rate"],
+            momentum=cfg["momentum"],
+            weight_decay=cfg["weight_decay"],
+            nesterov=True
+        )
     else:
         raise ValueError(f"Unknown optimizer: {cfg['optimizer']}")
-
     # Scheduler
     scheduler = None
     if cfg["scheduler"].lower() == "plateau":
-        scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode=cfg["plateau_mode"], patience=cfg["plateau_patience"], factor=0.5)
+        # ReduceLROnPlateau 根据验证指标不再提升时降低学习率
+        scheduler = optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer,
+            mode=cfg["plateau_mode"],
+            patience=cfg["plateau_patience"],
+            factor=0.5
+        )
     elif cfg["scheduler"].lower() == "cosine":
-        scheduler = optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg["cosine_Tmax"])
+        # CosineAnnealingLR 做余弦衰减
+        scheduler = optim.lr_scheduler.CosineAnnealingLR(
+            optimizer,
+            T_max=cfg["cosine_Tmax"]
+        )
 
+    # 选择损失函数
     criterion = nn.BCEWithLogitsLoss() if cfg["num_classes"] == 1 else nn.CrossEntropyLoss()
+    # AMP 梯度缩放器
     scaler = torch.amp.GradScaler('cuda', enabled=cfg["amp"] and DEVICE.type == 'cuda')
 
+    # --- 恢复训练（Resume）相关 ---
     start_epoch = 1
     best_dice = -math.inf
     no_improve = 0
 
-    # Resume
+    # if you storage the model checkpoint you can fill the resume_path in the config to resume training
     if cfg["resume_path"] and Path(cfg["resume_path"]).is_file():
         ckpt = torch.load(cfg["resume_path"], map_location=DEVICE)
         model.load_state_dict(ckpt["model"])
@@ -179,10 +226,11 @@ def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, cf
         best_dice = ckpt.get("best_score", -math.inf)
         logging.info(f"Resumed from {cfg['resume_path']} @ epoch {start_epoch}")
 
+    # wandb 记录初始化
     run = None
-    if cfg.get("use_wandb", True):
+    if cfg.get("wandb_enable", True):
         mode = os.environ.get("WANDB_MODE", "online")
-        run = wandb.init(entity=cfg["entity"], project=cfg["project_name"], config = {
+        run = wandb.init(wandb_entity=cfg["wandb_entity"], project=cfg["wandb_project_name"], config = {
             "learning_rate": cfg["learning_rate"],
             "batch_size": cfg["batch_size"],
             "architecture": "UNet",
@@ -191,20 +239,35 @@ def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, cf
             "amp": cfg["amp"],
         })
 
-    for epoch in range(start_epoch, cfg["epochs"] + 1):
-        model.train()
-        epoch_loss = 0.0
-        pbar = tqdm(total=len(train_loader.dataset), desc=f"Epoch {epoch}/{cfg['epochs']}", unit="img")
 
+    # --- 训练主循环 ---
+    for epoch in range(start_epoch, cfg["epochs"] + 1):
+        # 训练模式 启用 Dropout、更新 BatchNorm 统计量等。
+        model.train()
+        # 记录每个 epoch 的损失
+        epoch_loss = 0.0
+        # tqdm 进度条
+        pbar = tqdm(
+            total=len(train_loader.dataset),
+            desc=f"Epoch {epoch}/{cfg['epochs']}",
+            unit="img"
+        )
+
+        # 遍历训练集 DataLoader，每次取出一个 batch。
         for batch in train_loader:
-            imgs, masks = unpack(batch)
+            # 解包 batch 数据
+            imgs, masks = DatasetSizeMap.unpack(batch)
+            # 将图像张量搬到 GPU，并设置为 channels_last 格式
             imgs = imgs.to(DEVICE, dtype=torch.float32, memory_format=torch.channels_last)
             if cfg["num_classes"] == 1:
                 masks = masks.to(DEVICE, dtype=torch.float32)
             else:
                 masks = masks.to(DEVICE, dtype=torch.long)
 
+            # 梯度清零：将上一轮累积的梯度全部清除。
             optimizer.zero_grad(set_to_none=True)
+
+            # 前向计算
             with torch.autocast(DEVICE.type if DEVICE.type != 'mps' else 'cpu', enabled=cfg["amp"]):
                 logits = model(imgs)
                 if cfg["num_classes"] == 1:
@@ -216,28 +279,40 @@ def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, cf
                     dsc = dice_loss_from_logits(logits, masks, multiclass=True)
                     loss = ce + dsc
 
+            # 反向传播
+            # scale → unscale 这对操作本身并不会改变最终用于更新模型的梯度值；
+            # AMP（自动混合精度）后，所有被 autocast 包裹的前向和反向计算都会隐式地使用 float16：
+            # AMP 的目的是 autocast 上下文会自动把支持的算子（卷积、矩阵乘法、点积等）切换到 float16 进行计算，以加速并减少显存占用；不支持的算子仍保留在 float32。
+            # 它的作用只是为了在半精度（float16）下保护非常小的梯度不被“下溢”成 0，从而保证训练的稳定性。
             scaler.scale(loss).backward()
             if cfg["gradient_clip"]:
+                # 取消对梯度的缩放，以便准确裁剪。
                 scaler.unscale_(optimizer)
+                # 梯度裁剪：防止梯度爆炸。
                 torch.nn.utils.clip_grad_norm_(model.parameters(), cfg["gradient_clip"])
+            # 根据缩放梯度后结果更新参数。
             scaler.step(optimizer)
+            # 更新缩放器
             scaler.update()
-
+            
+            # 当前 batch 的实际样本数
             bs = imgs.size(0)
+            # 累加当前 batch 的损失
             epoch_loss += loss.item() * bs
+            # 更新进度条
             pbar.update(bs)
             pbar.set_postfix(loss=f"{loss.item():.4f}")
 
             if run:
                 wandb.log({"train/loss": loss.item(), "epoch": epoch})
-
         pbar.close()
         epoch_loss /= len(train_loader.dataset)
 
         # validate at end of epoch
+        # 算本轮平均训练 loss：把累加的总 loss 除以训练集总样本数
         val_loss, val_dice = validate(model, val_loader, cfg)
 
-        #pint log local
+        # print log local
         logging.info(f"Epoch {epoch}/{cfg['epochs']}: "
                      f"Train Loss: {epoch_loss:.4f}, "
                      f"Val Loss: {val_loss:.4f}, "
@@ -252,7 +327,7 @@ def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, cf
                 "epoch": epoch
             }
 
-            # Save sample images to wandb
+            # Save sample images to wandb 
             # try:
             #     # Log last batch samples
             #     sample_img = imgs[0].detach().cpu()
@@ -270,6 +345,11 @@ def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, cf
             # except Exception:
             #     pass
 
+            # Log histograms of model parameters
+            # 卷积层权重 encoder.block1.conv1.weight、decoder.upconv.weigh
+            # 卷积偏置等 *.bias
+            # BatchNorm 全称是 Batch Normalization（批量归一化） bn.weight、bn.bias
+            # 最后分类头的权重和偏置 final_conv.weight、final_conv.bias
             if cfg["log_histograms"]:
                 for name, param in model.named_parameters():
                     if param.requires_grad and not torch.isnan(param).any():
@@ -277,7 +357,7 @@ def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, cf
 
             wandb.log(log_dict)
 
-        # scheduler step
+         # --- Scheduler 更新 ---
         if scheduler is not None:
             if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                 scheduler.step(val_dice if cfg["plateau_mode"] == "max" else val_loss)
@@ -293,10 +373,10 @@ def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, cf
             no_improve += 1
 
         if is_best:
-            save_ckpt(model, optimizer, scheduler, epoch, best_dice, cfg, is_best)
-
-        elif epoch == cfg["epochs"]:
-            save_ckpt(model, optimizer, scheduler, epoch, best_dice, cfg, False)
+            # save first
+            save_ckpt(model, optimizer, scheduler, epoch, best_dice, cfg)
+            # then remove the old best checkpoint, keep only the latest best
+            remove_ckpt(cfg, keep_epoch=epoch)
 
         # early stop
         if cfg["early_stop_patience"] is not None and no_improve >= cfg["early_stop_patience"]:
@@ -305,15 +385,13 @@ def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, cf
 
     if run:
         run.finish()
+
     logging.info(f"Training complete. Best Dice: {best_dice:.4f}")
 
-
-def save_ckpt(model, optimizer, scheduler, epoch, best_score, cfg, is_best):
+def save_ckpt(model, optimizer, scheduler, epoch, best_score, cfg):
     ckpt_dir = Path(cfg["checkpoint_dir"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    
-    # 只保存最佳模型
-    best_path = ckpt_dir / cfg.get("best_ckpt_name", "best_model.pth")
+    model_path = ckpt_dir / f'checkpoint_{epoch}_loss_{best_score:.4f}.pth'
     torch.save({
         "epoch": epoch,
         "model": model.state_dict(),
@@ -321,17 +399,38 @@ def save_ckpt(model, optimizer, scheduler, epoch, best_score, cfg, is_best):
         "scheduler": scheduler.state_dict() if scheduler is not None else None,
         "best_score": best_score,
         "config": cfg
-    }, best_path)
-    logging.info(f"New best model saved: {best_path} (Dice: {best_score:.4f})")
+    }, model_path)
+    logging.info(f"New best model saved: {model_path} (Dice: {best_score:.4f})")
 
+def remove_ckpt(cfg, keep_epoch: int):
+    """
+    遍历 checkpoint_dir 下所有符合 checkpoint_{epoch}_loss_*.pth
+    格式的文件，删除其中 epoch != keep_epoch 的文件。
+    """
+    ckpt_dir = Path(cfg["checkpoint_dir"])
+    # 正则匹配：从文件名提取出 epoch 数字
+    pattern = re.compile(r'^checkpoint_(\d+)_loss_.*\.pth$')
+
+    for f in ckpt_dir.glob('checkpoint_*_loss_*.pth'):
+        m = pattern.match(f.name)
+        if not m:
+            continue
+        ep = int(m.group(1))
+        # 如果不是当前要保留的 epoch，就删掉
+        if ep != keep_epoch:
+            try:
+                f.unlink()
+                logging.info(f"Removed old checkpoint: {f.name}")
+            except Exception as e:
+                logging.warning(f"Failed to remove {f.name}: {e}")
 
 # ----------------------------------------------------------------------------------
 #                                        MAIN
 # ----------------------------------------------------------------------------------
 if __name__ == "__main__":
+
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logging.info(f"Device: {DEVICE}")
-
 
     test_id = "1"
     test_name = "phantom_taobao"
@@ -357,21 +456,12 @@ if __name__ == "__main__":
         ToTensorV2(),
     ])
 
-    transform_test = A.Compose([
-        A.Normalize(mean=(0.5,), std=(0.5,)),
-        ToTensorV2(),
-    ])
-
     train_df = pd.read_csv(TRAIN_DIR)
     train_ds = DatasetSizeMap(train_df, transform_train)
     validation_df = pd.read_csv(VAL)
     validation_ds = DatasetSizeMap(validation_df, transform_val)
-    test_df = pd.read_csv(TEST_DIR)
-    test_ds = DatasetSizeMap(test_df, transform_test)
-
     train_loader = DataLoader(train_ds, batch_size=CONFIG["batch_size"], shuffle=True, num_workers=4)
     validation_loader = DataLoader(validation_ds, batch_size=CONFIG["batch_size"], shuffle=False, num_workers=4)
-    test_loader = DataLoader(test_ds, batch_size=CONFIG["batch_size"], shuffle=False, num_workers=4)
 
     try:
         train_loader
@@ -379,7 +469,7 @@ if __name__ == "__main__":
     except NameError:
         raise RuntimeError("train_loader / validation_loader 未定义，请在此文件上方粘贴你创建 DataLoader 的代码或在 import 前构建好它们。")
 
-    model = UNet(n_channels=1, n_classes=CONFIG["num_classes"], bilinear=CONFIG["bilinear"])
+    model = UNet(n_channels=CONFIG["n_channels"], n_classes=CONFIG["num_classes"], bilinear=CONFIG["bilinear"])
     model = model.to(DEVICE, memory_format=torch.channels_last)
 
     # 可选：小显存时用 checkpointing（如果你的 UNet 实现里有这个方法）

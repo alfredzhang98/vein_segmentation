@@ -26,17 +26,15 @@ VALIDATION_DIR = OUTPUT_DIR / "validation.csv"
 TEST_DIR = OUTPUT_DIR / "test.csv"
 
 class DatasetSizeMap(Dataset):
-    def __init__(self, df, transform=None):
+    def __init__(self, df, transform = A.Compose([
+        A.Normalize(mean=(0.5,), std=(0.5,)),
+        ToTensorV2()
+    ]), max_height = 576, max_width = 544):
         self.df = df
         self.transform = transform
-        # 统计 image_width list种类
-        print(f"image_width list种类: {self.df['image_width'].unique()}")
-        # 统计 image_height list种类
-        print(f"image_height list种类: {self.df['image_height'].unique()}")
-        # 统计 micropixel list种类
-        print(f"micropixel list种类: {self.df['micropixel'].unique()}")
-        self.max_height = self.df['image_height'].max()
-        self.max_width = self.df['image_width'].max()
+        # This should be 576*544 for the dataset, becasue it could be devided by 32 and also it is larger then max image size
+        self.max_height = max_height
+        self.max_width = max_width
 
     def __len__(self):
         return len(self.df)
@@ -46,82 +44,81 @@ class DatasetSizeMap(Dataset):
         image_file_path = row['relative_path']
         mask_file_path = row['mask_path']
 
-        # if the system is linux, convert \\ to /
+        # if the system is linux, convert \\ to / 
         if sys.platform.startswith("linux"):
             image_file_path = image_file_path.replace("\\", "/")
             mask_file_path = mask_file_path.replace("\\", "/")
 
-        # Bmode image is gray picture
+        # Bmode image is gray picture so we just use the one channel to keep the gray channel
         image = Image.open(image_file_path).convert("L")
         mask  = Image.open(mask_file_path).convert("L")
 
-        # To tensor
-        if self.transform is not None:
-            augmented = self.transform(image=np.array(image), mask=np.array(mask))
-            image = augmented['image']
-            mask  = augmented['mask'].float().div_(255.0)
-        else:
-            image = ToTensorV2()(image=np.array(image))['image']
-            mask = ToTensorV2()(image=np.array(mask))['image']
-            mask = mask.float().div_(255.0)
+        # To tensor we use the transform pipeline convert the image and mask to tensor
+        augmented = self.transform(image=np.array(image), mask=np.array(mask))
+        image = augmented['image']
+        # normalize the mask to [0, 1] range
+        mask  = augmented['mask'].float().div_(255.0)
 
+        # Pad the image and mask to the max height and width
         dh = self.max_height - image.shape[1]
         dw = self.max_width - image.shape[2]
         if dh or dw:
             image = F.pad(image, (0, dw, 0, dh), value=0)
             mask  = F.pad(mask,  (0, dw, 0, dh), value=0)
 
-        H2, W2 = image.shape[1], image.shape[2]
-        dh2 = (-H2) % 32
-        dw2 = (-W2) % 32
-        if dh2 or dw2:
-            image = F.pad(image, (0, dw2, 0, dh2), value=0)
-            mask  = F.pad(mask,  (0, dw2, 0, dh2), value=0)
-
         if mask.ndim == 2:
+            # mask.unsqueeze(0) is to add a channel dimension on the 0th axis
             mask = mask.unsqueeze(0)
 
         return image, mask
-    
-def unpack(batch):
-    if isinstance(batch, dict):
-        return batch['image'], batch['mask']
-    return batch[0], batch[1]
 
-def debug_data_range(loader, name="data"):
-    print(f"\n=== {name} Debug Info ===")
-    for i, batch in enumerate(loader):
-        imgs, masks = unpack(batch)
-        
-        print(f"Batch {i}:")
-        print(f"  Images - Shape: {imgs.shape}, Min: {imgs.min():.4f}, Max: {imgs.max():.4f}")
-        print(f"  Masks  - Shape: {masks.shape}, Min: {masks.min():.4f}, Max: {masks.max():.4f}")
-        print(f"  Mask unique values: {torch.unique(masks)}")
-        
-        if i >= 2:  # 只检查前几个batch
-            break
-    print("=" * 30)
+    @staticmethod
+    def denorm_image(img_tensor, mean=(0.5,), std=(0.5,)):
+        # img_tensor: [C,H,W]
+        mean = torch.tensor(mean).view(1,1,1)
+        std  = torch.tensor(std).view(1,1,1)
+        img = img_tensor * std + mean
+        img = (img * 255).clamp(0, 255)
+        return img.byte()
+    
+    @staticmethod
+    def denorm_mask(mask_tensor):
+        # mask_tensor: [C,H,W]
+        mask = (mask_tensor * 255).clamp(0, 255)
+        return mask.byte()
+
+    @staticmethod
+    def unpack(batch):
+        if isinstance(batch, dict):
+            return batch['image'], batch['mask']
+        return batch[0], batch[1]
+
+    @staticmethod
+    def debug_data_range(loader, name="data"):
+        print(f"\n=== {name} Debug Info ===")
+        for i, batch in enumerate(loader):
+            imgs, masks = DatasetSizeMap.unpack(batch)
+            print(f"Batch {i}:")
+            print(f"  Images - Shape: {imgs.shape}, Min: {imgs.min():.4f}, Max: {imgs.max():.4f}")
+            print(f"  Masks  - Shape: {masks.shape}, Min: {masks.min():.4f}, Max: {masks.max():.4f}")
+            print(f"  Mask unique values: {torch.unique(masks)}")
+            break  # Only check the first batch for debugging
 
 # main
 if __name__ == "__main__":
 
-    transform_train = A.Compose([
-        A.Normalize(mean=(0.5,), std=(0.5,)),
-        ToTensorV2(),
-    ])
-
     train_df = pd.read_csv(TRAIN_DIR)
-    train_ds = DatasetSizeMap(train_df, transform_train)
+    train_ds = DatasetSizeMap(train_df)
+    train_data = DataLoader(train_ds, batch_size=32, shuffle=False, num_workers=0)
+    DatasetSizeMap.debug_data_range(train_data, "Train")
 
-    image, mask = train_ds[111]
-    print(f"Image type: {type(image)}, Mask type: {type(mask)}")
-    print(f"Image shape: {image.shape}, Mask shape: {mask.shape}")
+    test, test2 =  train_ds[10]
 
-    train_data = DataLoader(train_ds, batch_size=8, shuffle=False, num_workers=0)
-    val_loader = DataLoader(train_ds, batch_size=8, shuffle=False, num_workers=0)
-
-    debug_data_range(train_data, "Train")
-    debug_data_range(val_loader, "Validation")
+    # print the data info
+    # print(f"Test Image Shape: {test.shape}, Min: {test.min():.4f}, Max: {test.max():.4f}")
+    # print(f"Test Mask Shape: {test2.shape}, Min: {test2.min():.4f}, Max: {test2.max():.4f}")
+    # print(f"Test Image Unique Values: {torch.unique(test)}")
+    # print(f"Test Mask Unique Values: {torch.unique(test2)}")
 
     # 数据加载
     # train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True,  num_workers=4)

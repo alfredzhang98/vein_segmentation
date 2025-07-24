@@ -1,6 +1,12 @@
 # How to play with Clarius
 There are other examples in the `cast_examples` directory.
 
+Here are gui screenshots:
+<p align="center">
+  <img src="ref/mdimages/gui1.png" alt="gui1" width="45%" />
+  <img src="ref/mdimages/gui2.png" alt="gui2" width="45%" />
+</p>
+
 ## Clarius Ultrasound Device HD3 L7
 
 
@@ -13,7 +19,7 @@ Here is the application and whole project detials for the segmentation of ultras
 
 The result of the prediction on the test dataset:
 
-![segmentation_result](/ref/mdimages/result_show.png)
+![segmentation_result](ref/mdimages/result_show.png)
 
 ```
 Infering on Tesla V100-PCIE-32GB 

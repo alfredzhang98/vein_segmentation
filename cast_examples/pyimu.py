@@ -4,6 +4,8 @@ import ctypes
 import os.path
 import sys
 
+modelPath = os.path.join(os.path.dirname(__file__), "3Dmodel")
+
 if sys.platform.startswith("linux"):
     libcast_handle = ctypes.CDLL("./libcast.so", ctypes.RTLD_GLOBAL)._handle  # load the libcast.so shared library
     pyclariuscast = ctypes.cdll.LoadLibrary("./pyclariuscast.so")  # load the pyclariuscast.so shared library
@@ -109,7 +111,7 @@ class ScannerWindow(Qt3DExtras.Qt3DWindow):
         self.scannerEntity = Qt3DCore.QEntity(self.rootEntity)
         # QSceneLoader loads materials from scanner.mtl referenced in scanner.obj
         self.scanner = Qt3DRender.QSceneLoader(self.scannerEntity)
-        self.scanner.setSource(QUrl.fromLocalFile("3Dmodel/scanner.obj"))
+        self.scanner.setSource(QUrl.fromLocalFile(os.path.join(modelPath, "scanner.obj")))
         self.scannerEntity.addComponent(self.scanner)
         self.addTransform()
 

@@ -15,3 +15,6 @@ __pycache__/
 
 # ignore png files
 *.png
+
+# expect the png file in the ref directory
+!ref/*.png

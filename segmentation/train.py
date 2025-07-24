@@ -45,7 +45,7 @@ CONFIG: Dict[str, Any] = {
     "cosine_Tmax": 50,
     "amp": True,
     ## model
-    "batch_size": 16,                                   # batch size per GPU
+    "batch_size": 32,                                   # batch size per GPU
     "n_channels": 1,                                    # input channels, e.g. 1 for grayscale
     "num_classes": 1,                                   # 1 -> binary, >1 -> multiclass
     ## training and optimizer
@@ -357,7 +357,9 @@ def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, cf
 
             wandb.log(log_dict)
 
-         # --- Scheduler 更新 ---
+        # --- Scheduler 更新 ---
+        # 在每个 epoch 结束后更新学习率
+        # 当该指标在连续若干个 epoch 内 没有改善（即“plateau”期）时，就自动把学习率乘以一个因子（如 0.5）降低
         if scheduler is not None:
             if isinstance(scheduler, optim.lr_scheduler.ReduceLROnPlateau):
                 scheduler.step(val_dice if cfg["plateau_mode"] == "max" else val_loss)
@@ -391,7 +393,7 @@ def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, cf
 def save_ckpt(model, optimizer, scheduler, epoch, best_score, cfg):
     ckpt_dir = Path(cfg["checkpoint_dir"])
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    model_path = ckpt_dir / f'checkpoint_{epoch}_loss_{best_score:.4f}.pth'
+    model_path = ckpt_dir / f'checkpoint_{epoch}_dice_{best_score:.4f}.pth'
     torch.save({
         "epoch": epoch,
         "model": model.state_dict(),
@@ -404,14 +406,14 @@ def save_ckpt(model, optimizer, scheduler, epoch, best_score, cfg):
 
 def remove_ckpt(cfg, keep_epoch: int):
     """
-    遍历 checkpoint_dir 下所有符合 checkpoint_{epoch}_loss_*.pth
+    遍历 checkpoint_dir 下所有符合 checkpoint_{epoch}_dice_*.pth
     格式的文件，删除其中 epoch != keep_epoch 的文件。
     """
     ckpt_dir = Path(cfg["checkpoint_dir"])
     # 正则匹配：从文件名提取出 epoch 数字
-    pattern = re.compile(r'^checkpoint_(\d+)_loss_.*\.pth$')
+    pattern = re.compile(r'^checkpoint_(\d+)_dice_.*\.pth$')
 
-    for f in ckpt_dir.glob('checkpoint_*_loss_*.pth'):
+    for f in ckpt_dir.glob('checkpoint_*_dice_*.pth'):
         m = pattern.match(f.name)
         if not m:
             continue

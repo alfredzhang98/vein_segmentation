@@ -30,3 +30,9 @@ Infering on Tesla V100-PCIE-32GB
 [Inference performance] Inference frame rate (FPS): 439.25
 [TEST] loss: 0.0155 | dice: 0.9866
 ```
+
+A real time deomo of the segmentation model can be found in the `GUI` directory.
+
+The video show below:
+
+![real time live demo on cpu](ref/mdimages/realtimedemo.gif)

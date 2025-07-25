@@ -18,3 +18,6 @@ __pycache__/
 
 # expect the png files in the ref directory (all subdirectories)
 !ref/**/*.png
+
+# only ignore png files in segmentation directory
+!segmentation/*.png

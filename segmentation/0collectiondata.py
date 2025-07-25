@@ -19,11 +19,13 @@ else:
     import pyclariuscast
 
 # Configuration
-TEST_ID = "2"
+TEST_ID = "1"
 TEST_NAME = "phantom_taobao"
 OUTPUT_DIR = Path(f"data")
-IP = "192.168.1.1"
+IP = "192.168.1.108"
 PORT = 5828
+
+#BUG: 会卡但是别急，等一下就好，能保存也
 
 # Clarius userFunction commands
 CMD_FREEZE = 1

@@ -22,8 +22,11 @@ out_csv        = base_dir / f"meta_{test_name}_{test_id}_augmented.csv"
 # 要增强的类别（现在是数组）
 aug_types = ["negative", "positive"]
 
-# 每张图像增强次数
-N_AUG = 10
+target_aug_times = {
+    "negative": 10,
+    "positive": 15,
+}
+
 # ------------------------------------------------
 
 # 确保输出目录存在
@@ -60,7 +63,7 @@ def random_transform(img, mask):
         mask = cv2.flip(mask, 1)
 
     # 随机旋转
-    angle = random.uniform(-10, 10)
+    angle = random.uniform(-20, 20)
     h, w = img.shape[:2]
     M = cv2.getRotationMatrix2D((w / 2, h / 2), angle, 1.0)
     img = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_LINEAR,  borderMode=cv2.BORDER_REPLICATE)
@@ -108,7 +111,7 @@ for cls in aug_types:
             continue
         mask = (m > 127).astype(np.uint8)
 
-        for i in range(N_AUG):
+        for i in range(target_aug_times[cls]):
             aug_img, aug_mask = random_transform(img, mask)
             aug_mask = (aug_mask * 255).astype(np.uint8)
 

@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+#BUG: It would be a little bit of a stack, just wait a moment, it can be saved
 
 import sys
 import csv
@@ -10,6 +11,7 @@ from datetime import datetime
 from PySide6 import QtCore, QtGui, QtWidgets
 from PySide6.QtCore import Qt, Slot
 from PIL import Image
+from DataInfo import DataInfo
 
 # Load Clarius libraries
 if sys.platform.startswith("linux"):
@@ -19,13 +21,8 @@ else:
     import pyclariuscast
 
 # Configuration
-TEST_ID = "1"
-TEST_NAME = "phantom_taobao"
-OUTPUT_DIR = Path(f"data")
 IP = "192.168.1.108"
 PORT = 5828
-
-#BUG: 会卡但是别急，等一下就好，能保存也
 
 # Clarius userFunction commands
 CMD_FREEZE = 1
@@ -76,7 +73,6 @@ class ImageView(QtWidgets.QGraphicsView):
         QtWidgets.QGraphicsView.__init__(self)
         self.cast = cast
         self.setScene(QtWidgets.QGraphicsScene())
-        # 初始化一个空图像
         self.image = QtGui.QImage(640, 480, QtGui.QImage.Format_ARGB32)
         self.image.fill(QtCore.Qt.black)
 
@@ -102,9 +98,8 @@ class ImageView(QtWidgets.QGraphicsView):
         if hasattr(self, 'image') and not self.image.isNull():
             painter.drawImage(rect, self.image)
 
-# 自定义保存预览对话框
 class SavePreviewDialog(QtWidgets.QDialog):
-    def __init__(self, image, filename, image_info, parent=None):
+    def __init__(self, image: QtGui.QImage, filename: str, image_info: str, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Save Image Preview")
         self.setModal(True)
@@ -112,18 +107,15 @@ class SavePreviewDialog(QtWidgets.QDialog):
         
         layout = QtWidgets.QVBoxLayout(self)
         
-        # 文件名标签
         filename_label = QtWidgets.QLabel(f"Save as: {filename}")
         filename_label.setAlignment(Qt.AlignCenter)
         filename_label.setStyleSheet("font-weight: bold; font-size: 12px; padding: 10px;")
         layout.addWidget(filename_label)
         
-        # 图片预览
         self.image_label = QtWidgets.QLabel()
         self.image_label.setAlignment(Qt.AlignCenter)
         self.image_label.setStyleSheet("border: 2px solid gray; background-color: black;")
         
-        # 缩放图片以适应预览窗口
         max_size = QtCore.QSize(500, 350)
         scaled_pixmap = QtGui.QPixmap.fromImage(image).scaled(
             max_size, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -132,7 +124,6 @@ class SavePreviewDialog(QtWidgets.QDialog):
         
         layout.addWidget(self.image_label)
         
-        # 图片信息
         info_layout = QtWidgets.QVBoxLayout()
         info_text1 = f"Original Size: {image.width()}×{image.height()} | Format: {image.format().name}"
         info_label1 = QtWidgets.QLabel(info_text1)
@@ -140,7 +131,6 @@ class SavePreviewDialog(QtWidgets.QDialog):
         info_layout.addWidget(info_label1)
         layout.addLayout(info_layout)
         
-        # 按钮
         button_layout = QtWidgets.QHBoxLayout()
         self.yes_button = QtWidgets.QPushButton("Yes, Save")
         self.no_button = QtWidgets.QPushButton("No, Cancel")
@@ -149,7 +139,6 @@ class SavePreviewDialog(QtWidgets.QDialog):
         button_layout.addWidget(self.no_button)
         layout.addLayout(button_layout)
         
-        # 连接信号
         self.yes_button.clicked.connect(self.accept)
         self.no_button.clicked.connect(self.reject)
 
@@ -157,36 +146,30 @@ class SavePreviewDialog(QtWidgets.QDialog):
 class MainWidget(QtWidgets.QMainWindow):
     def __init__(self, cast):
         super().__init__()
+        self.datainfo = DataInfo()
         self.cast = cast
-        self.test_id = TEST_ID
-        self.output_dir = OUTPUT_DIR
-        self.img_dir = self.output_dir / f"{TEST_NAME}" / "images"
-        self.meta_file = self.output_dir / f"{TEST_NAME}/meta_{TEST_NAME}_{self.test_id}.csv"
-        self.img_dir.mkdir(parents=True, exist_ok=True)
-        if not self.meta_file.exists():
-            self.output_dir.mkdir(parents=True, exist_ok=True)
-            with open(self.meta_file, 'w', newline='') as f:
+        if not self.datainfo.meta_file.exists():
+            with open(self.datainfo.meta_file, 'w', newline='') as f:
                 csv.writer(f).writerow(["id","filename","relative_path",
                                         "raw_timestamp","timestamp",
                                         "depth","gain","frequency",
                                         "bpp", "image_width","image_height", "micropixel",
-                                        # "qw", "qx", "qy", "qz", 
                                         "test_name", "test_id", "mask_status"])
 
-        with open(self.meta_file, 'r', newline='') as f:
+        with open(self.datainfo.meta_file, 'r', newline='') as f:
             reader = csv.reader(f)
             rows = list(reader)
 
         self.saved_count = max(0, len(rows) - 1)
 
         # 初始化参数
-        self.depth_counter = 0     # 本地计数器
-        self.gain_counter = 0      # 本地计数器
-        self.depth_step = 1        # 深度步长
-        self.gain_step = 10        # 增益步长
-        self.actual_depth = 4      # 实际设备值
-        self.actual_gain = 50      # 实际设备值
-        self.frequency = "8/10.0"  # 频率
+        self.depth_counter = 0     
+        self.gain_counter = 0      
+        self.depth_step = 1        
+        self.gain_step = 10        
+        self.actual_depth = 4      
+        self.actual_gain = 50      
+        self.frequency = "8/10.0"  
         self.frozen = True
 
         # key 防止重复按键
@@ -205,12 +188,11 @@ class MainWidget(QtWidgets.QMainWindow):
 
     def setup_ui(self):
         # UI
-        self.setWindowTitle(f"Clarius Capture - Test {self.test_id}")
+        self.setWindowTitle(f"Clarius Capture - Test {self.datainfo.test_id}")
         central = QtWidgets.QWidget()
         self.setCentralWidget(central)
         layout = QtWidgets.QVBoxLayout(central)
 
-        # 连接控制
         ctrl_layout = QtWidgets.QHBoxLayout()
         self.ip_edit = QtWidgets.QLineEdit(IP)
         self.port_edit = QtWidgets.QLineEdit(str(PORT))
@@ -228,7 +210,6 @@ class MainWidget(QtWidgets.QMainWindow):
         ctrl_layout.addWidget(self.btn_quit)
         layout.addLayout(ctrl_layout)
 
-        # 参数显示
         param_layout = QtWidgets.QHBoxLayout()
         self.depth_label = QtWidgets.QLabel(f"Depth: ({self.actual_depth} cm)")
         self.gain_label = QtWidgets.QLabel(f"Gain: ({self.actual_gain}%)")
@@ -246,7 +227,7 @@ class MainWidget(QtWidgets.QMainWindow):
         self.img = ImageView(self.cast)
         layout.addWidget(self.img)
 
-        # 说明
+        # Help section
         help_layout = QtWidgets.QVBoxLayout()
 
         help_label1 = QtWidgets.QLabel("Controls: 1 increase Depth | 2 decrease Depth | 3 increase Gain | 4 decrease Gain | S Save | Q Quit")
@@ -280,7 +261,6 @@ class MainWidget(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"Init error: {e}")
 
     def update_parameter_display(self):
-        """更新参数显示"""
         depth = self.actual_depth + self.depth_counter * self.depth_step
         gain = self.actual_gain + self.gain_counter * self.gain_step
 
@@ -345,9 +325,7 @@ class MainWidget(QtWidgets.QMainWindow):
         key = event.key()
         current_time = time.time()
 
-        # 检查是否是需要防抖的按键
         if key in self.key_last_pressed:
-            # 检查时间间隔
             if current_time - self.key_last_pressed[key] < self.key_interval:
                 remaining_time = self.key_interval - (current_time - self.key_last_pressed[key])
                 key_name = {
@@ -360,7 +338,6 @@ class MainWidget(QtWidgets.QMainWindow):
                 self.statusBar().showMessage(f"{key_name}: Wait {remaining_time:.1f}s")
                 return
             
-            # 更新该按键的最后按下时间
             self.key_last_pressed[key] = current_time
 
         try:
@@ -393,40 +370,30 @@ class MainWidget(QtWidgets.QMainWindow):
             self.statusBar().showMessage(f"Key error: {e}")
 
     def save_image_with_preview(self):
-        """带预览的保存图片 - 使用原始尺寸图像"""
-        # 使用原始图像而不是界面显示的图像
+        # use original image for saving
         if signaller.original_image.isNull():
             QtWidgets.QMessageBox.warning(self, "Warning", "No original image to save!")
             return
-        
-        # 准备图像信息
-        # 读取原始长度和高度
         im = Image.fromqimage(signaller.original_image)
         image_info = f"Original: {im.width}×{im.height}"
 
         micropixel = signaller.micropixel
         raw_timestamp = signaller.timestamp
-        # w = signaller.qw
-        # x = signaller.qx
-        # y = signaller.qy    
-        # z = signaller.qz
         bpp = signaller.bpp
 
         depth = self.actual_depth + self.depth_counter * self.depth_step
         gain = self.actual_gain + self.gain_counter * self.gain_step
             
-        # 生成文件名
         id = f"{self.saved_count:04d}"
         self.saved_count += 1
         ts = str(int(time.time() * 1000))
-        name = f"{id}_{ts}_T_{self.test_id}.png"
+        name = f"{id}_{ts}_T_{self.datainfo.test_id}.png"
 
-        # 显示预览对话框
         dialog = SavePreviewDialog(signaller.original_image, name, image_info, self)
         
         if dialog.exec() == QtWidgets.QDialog.Accepted:
             try:
-                path = self.img_dir / name
+                path = self.datainfo.images_dir / name
 
                 # Make sure the Alpha channel is handled correctly
                 if im.mode != 'RGBA':
@@ -442,12 +409,11 @@ class MainWidget(QtWidgets.QMainWindow):
                     width, height = im.size
 
                 
-                # 保存元数据，包含真实的图像尺寸
-                with open(self.meta_file, 'a', newline='') as f:
+                with open(self.datainfo.meta_file, 'a', newline='') as f:
                     csv.writer(f).writerow([
                         id, 
                         name, 
-                        str(self.img_dir / name),
+                        str(self.datainfo.images_dir / name),
                         raw_timestamp,
                         ts,
                         depth,
@@ -457,12 +423,8 @@ class MainWidget(QtWidgets.QMainWindow):
                         width,
                         height,
                         micropixel,
-                        # w,
-                        # x,
-                        # y,
-                        # z,
-                        TEST_NAME,
-                        self.test_id,
+                        self.datainfo.test_name,
+                        self.datainfo.test_id,
                         "ND"  # Mask status is not done (ND)
                     ])
             
@@ -484,11 +446,9 @@ class MainWidget(QtWidgets.QMainWindow):
         finally:
             QtWidgets.QApplication.quit()
 
-# 修改后的回调函数
 def newProcessedImage(image, width, height, sz, micronsPerPixel, timestamp, angle, imu):
     bpp = sz / (width * height)
     # print(f"Image size: {width}x{height}, BPP: {bpp}, Microns per pixel: {micronsPerPixel}, Timestamp: {timestamp}, Angle: {angle}")
-    # print(f"IMU data: {imu[0].qw} {imu[0].qx} {imu[0].qy} {imu[0].qz}" if imu else "No IMU data")
     if bpp == 4:
         img = QtGui.QImage(image, width, height, QtGui.QImage.Format_ARGB32)
     else:
@@ -497,10 +457,6 @@ def newProcessedImage(image, width, height, sz, micronsPerPixel, timestamp, angl
     signaller.original_image = img.copy()
     signaller.micropixel = micronsPerPixel
     signaller.timestamp = timestamp
-    # signaller.qw = imu[0].qw if imu else 0.0
-    # signaller.qx = imu[0].qx if imu else 0.0
-    # signaller.qy = imu[0].qy if imu else 0.0
-    # signaller.qz = imu[0].qz if imu else 0.0
     signaller.bpp = bpp
     signaller.usimage = img.copy()
     

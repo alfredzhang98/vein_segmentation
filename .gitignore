@@ -21,3 +21,6 @@ __pycache__/
 
 # only ignore png files in segmentation directory
 !segmentation/*.png
+
+# ignore npz
+*.npz

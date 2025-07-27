@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-PySide6-based 圆形刷子标注工具 for annotating phantom images.
-功能特点：
-- 圆形刷子自由绘制
-- 可调节刷子大小
-- 实时红色显示绘制区域
-- 保存二值化mask图像
-- 支持positive/negative/pass/ND四种状态标记
-- 修复颜色叠加问题
-- 修复mask颜色问题和简化操作流程
+PySide6-based circular brush annotation tool for annotating phantom images.
+Features:
+- Free drawing with circular brush
+- Adjustable brush size
+- Real-time red display of drawing area
+- Save binary mask images
+- Support for positive/negative/pass/ND status marking
+- Fixed color overlay issues
+- Fixed mask color issues and simplified operation flow
 """
 
 import sys
@@ -27,50 +27,32 @@ from PySide6.QtWidgets import (
     QGraphicsScene, QGraphicsPixmapItem, QSlider, QSpinBox, QTextEdit
 )
 
-# ─── Configuration ────────────────────────────────────────────────────────────
-test_id    = "1"
-test_name  = "phantom_taobao"
-base_dir   = Path("data") / test_name
-csv_path   = base_dir / f"meta_{test_name}_{test_id}.csv"
-img_dir    = base_dir / "images"
-mask_dir   = base_dir / "masks"
-mask_dir.mkdir(parents=True, exist_ok=True)
+from DataInfo import DataInfo
+# ────────────────────────────────────────────────────────────────────────────────
+# Configuration parameters
+MIN_BRUSH_SIZE = 5   # Minimum brush size
+MAX_BRUSH_SIZE = 100 # Maximum brush size
+DEFAULT_BRUSH_SIZE = 20  # Default brush size
+BRUSH_COLOR = QColor(0, 255, 0, 50)  # Green semi-transparent
 
-# 正在加载测试数据: phantom_taobao (Test 1)
-# CSV路径: data\phantom_taobao\meta_phantom_taobao_1.csv
-# 图像目录: data\phantom_taobao\images
-# Mask目录: data\phantom_taobao\masks
-
-print(f"正在加载测试数据: {test_name} (Test {test_id})")
-print(f"CSV路径: {csv_path}")
-print(f"图像目录: {img_dir}")
-print(f"Mask目录: {mask_dir}")
-
-
-# 配置参数
-MIN_BRUSH_SIZE = 5   # 最小刷子大小
-MAX_BRUSH_SIZE = 100 # 最大刷子大小
-DEFAULT_BRUSH_SIZE = 20  # 默认刷子大小
-BRUSH_COLOR = QColor(0, 255, 0, 50)  # 绿色半透明
-
-# 状态常量
-STATUS_ND = "ND"           # 待处理
-STATUS_POSITIVE = "positive"  # 正样本（有标注内容）
-STATUS_NEGATIVE = "negative"  # 负样本（空白标注）
-STATUS_PASS = "pass"         # 跳过
+# Status constants
+STATUS_ND = "ND"              # To be processed
+STATUS_POSITIVE = "positive"  # Positive sample (with annotation content)
+STATUS_NEGATIVE = "negative"  # Negative sample (blank annotation)
+STATUS_PASS = "pass"          # Skip
 # ────────────────────────────────────────────────────────────────────────────────
 
 class PaintView(QGraphicsView):
-    """用Source直接绘制的圆形刷子，抗锯齿+不叠加颜色。"""
+    """Use Source to directly draw circular brush, anti-aliasing + no color overlay."""
     def __init__(self):
         super().__init__()
         self.setScene(QGraphicsScene(self))
 
-        # 底图
+        # Base image
         self.pixmap_item = QGraphicsPixmapItem()
         self.scene().addItem(self.pixmap_item)
 
-        # 绘制层
+        # Drawing layer
         self.paint_pixmap = None
         self.paint_item = QGraphicsPixmapItem()
         self.scene().addItem(self.paint_item)
@@ -86,7 +68,7 @@ class PaintView(QGraphicsView):
         self.pixmap_item.setPixmap(pix)
         self.setSceneRect(pix.rect())
 
-        # 初始化一个透明的画布
+        # Initialize a transparent canvas
         self.paint_pixmap = QPixmap(pix.size())
         self.paint_pixmap.fill(Qt.GlobalColor.transparent)
         self.paint_item.setPixmap(self.paint_pixmap)
@@ -114,7 +96,7 @@ class PaintView(QGraphicsView):
         super().mouseReleaseEvent(ev)
 
     def _draw_circle(self, center: QPointF):
-        """在主层直接画一个圆，不做任何叠加。"""
+        """Draw a circle directly on the main layer without any overlay."""
         painter = QPainter(self.paint_pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setCompositionMode(QPainter.CompositionMode_Source)
@@ -126,7 +108,7 @@ class PaintView(QGraphicsView):
         self.paint_item.setPixmap(self.paint_pixmap)
 
     def _draw_line(self, p0: QPointF, p1: QPointF):
-        """在两点间用圆形"刷子"画连续点，保证线连续且颜色一致。"""
+        """Draw continuous points between two points with circular 'brush' to ensure line continuity and consistent color."""
         dist = (p1 - p0).manhattanLength()
         step = max(1, self.brush_size / 2)
         steps = int(dist / step) + 1
@@ -137,28 +119,28 @@ class PaintView(QGraphicsView):
             self._draw_circle(pt)
 
     def clear_painting(self):
-        """一键清除所有笔划。"""
+        """Clear all strokes with one click."""
         if self.paint_pixmap:
             self.paint_pixmap.fill(Qt.GlobalColor.transparent)
             self.paint_item.setPixmap(self.paint_pixmap)
 
     def get_mask_pixmap(self):
-        """直接返回二值Mask：将半透明区变白，其它黑。"""
+        """Directly return binary mask: convert semi-transparent areas to white, others to black."""
         if not self.paint_pixmap:
             return None
         
         img = self.paint_pixmap.toImage()
         h, w = img.height(), img.width()
         
-        # 修复：使用 RGB32 格式创建mask，然后转换为灰度
+        # Fix: Use RGB32 format to create mask, then convert to grayscale
         mask = QImage(w, h, QImage.Format.Format_RGB32)
-        mask.fill(Qt.GlobalColor.black)  # 默认填充黑色
+        mask.fill(Qt.GlobalColor.black)  # Default fill with black
         
         for y in range(h):
             for x in range(w):
                 color = img.pixelColor(x, y)
-                if color.alpha() > 0:  # 有绘制内容的地方
-                    mask.setPixel(x, y, QColor(255, 255, 255).rgb())  # 设置为纯白色
+                if color.alpha() > 0:  # Areas with drawing content
+                    mask.setPixel(x, y, QColor(255, 255, 255).rgb())  # Set to pure white
         
         return QPixmap.fromImage(mask)
 
@@ -166,18 +148,19 @@ class PaintView(QGraphicsView):
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle(f"圆形刷子标注工具: {test_name} (Test {test_id})")
-        
-        # 设置统一的中文字体
+        self.dataInfo = DataInfo()
+        self.setWindowTitle(f"Circular Brush Annotation Tool: {self.dataInfo.test_name} (Test {self.dataInfo.test_id})")
+
+        # Set unified font
         self.setup_fonts()
         
-        # 1) 加载CSV
-        with open(csv_path, newline='', encoding='utf-8') as f:
+        # 1) Load CSV
+        with open(self.dataInfo.meta_file, newline='', encoding='utf-8') as f:
             reader = csv.DictReader(f)
             self.fieldnames = reader.fieldnames
             self.rows = list(reader)
             
-        # 2) 查找状态和路径列
+        # 2) Find status and path columns
         candidates = [c for c in self.fieldnames
                       if c.lower() in
                          ('status','mask_status','label_status','annotation_status','annot_status')]
@@ -198,25 +181,25 @@ class MainWindow(QMainWindow):
                 "Add 'relative_path' or 'filename'.")
             sys.exit(1)
             
-        # 3) 构建待处理列表 - 只处理状态为ND的图像
+        # 3) Build pending list - only process images with ND status
         self.pending = [i for i,r in enumerate(self.rows) if r[self.status_col] == STATUS_ND]
         if not self.pending:
-            QMessageBox.information(self, "完成", "没有待处理的图像（状态为ND）。")
+            QMessageBox.information(self, "Completed", "No images to process (status is ND).")
             sys.exit(0)
         self.cur = 0
 
-        # ─── UI构建 ─────────────────────────────────────────────────────────────
+        # ─── UI Construction ─────────────────────────────────────────────────────────────
         w = QWidget()
         self.setCentralWidget(w)
         vlay = QVBoxLayout(w)
 
-        # 绘制画布
+        # Drawing canvas
         self.view = PaintView()
         vlay.addWidget(self.view, stretch=1)
 
-        # 刷子大小控制
+        # Brush size control
         brush_layout = QHBoxLayout()
-        brush_label = QLabel("刷子大小:")
+        brush_label = QLabel("Brush Size:")
         brush_label.setFont(self.chinese_font)
         brush_layout.addWidget(brush_label)
         
@@ -236,16 +219,16 @@ class MainWindow(QMainWindow):
         
         vlay.addLayout(brush_layout)
 
-        # 控制按钮
+        # Control buttons
         hlay = QHBoxLayout()
-        self.btn_prev = QPushButton("上一张")
-        self.btn_next = QPushButton("下一张")
-        self.btn_clear = QPushButton("清除绘制")
-        self.btn_pass = QPushButton("跳过")
-        self.btn_negative = QPushButton("负样本")
-        self.btn_positive = QPushButton("正样本")
+        self.btn_prev = QPushButton("Previous")
+        self.btn_next = QPushButton("Next")
+        self.btn_clear = QPushButton("Clear Drawing")
+        self.btn_pass = QPushButton("Skip")
+        self.btn_negative = QPushButton("Negative")
+        self.btn_positive = QPushButton("Positive")
         
-        # 设置按钮样式和字体
+        # Set button styles and fonts
         buttons = [self.btn_prev, self.btn_next, self.btn_clear, 
                   self.btn_negative, self.btn_pass, self.btn_positive]
         for btn in buttons:
@@ -259,15 +242,15 @@ class MainWindow(QMainWindow):
         hlay.addWidget(self.btn_positive)
         vlay.addLayout(hlay)
 
-        # 状态显示和日志区域
+        # Status display and log area
         self.status_label = QLabel()
         self.status_label.setFont(self.chinese_font)
         vlay.addWidget(self.status_label)
         
-        # 添加日志显示区域
+        # Add log display area
         self.log_area = QTextEdit()
         self.log_area.setFont(self.chinese_font)
-        self.log_area.setMaximumHeight(120)  # 限制高度
+        self.log_area.setMaximumHeight(120)  # Limit height
         self.log_area.setReadOnly(True)
         self.log_area.setStyleSheet("""
             QTextEdit {
@@ -280,13 +263,13 @@ class MainWindow(QMainWindow):
         vlay.addWidget(self.log_area)
         
         help_text = QLabel(
-            "操作提示：\n"
-            "• 左键按住拖拽绘制区域（已修复颜色叠加问题）\n"
-            "• 滑动条或数字框调节刷子大小\n"
-            "• 清除绘制：清空当前绘制内容\n"
-            "• 负样本：保存全黑mask（无标注区域）\n"
-            "• 正样本：保存绘制区域的二值化mask（有标注区域）\n"
-            "• 跳过：不保存任何内容，标记为pass"
+            "Operation Tips:\n"
+            "• Left-click and drag to draw area (fixed color overlay issue)\n"
+            "• Use slider or spin box to adjust brush size\n"
+            "• Clear Drawing: Clear current drawing content\n"
+            "• Negative: Save all-black mask (no annotation area)\n"
+            "• Positive: Save binary mask of drawn area (with annotation area)\n"
+            "• Skip: Don't save anything, mark as pass"
         )
         help_text.setFont(self.chinese_font)
         help_text.setStyleSheet("""
@@ -301,7 +284,7 @@ class MainWindow(QMainWindow):
         """)
         vlay.addWidget(help_text)
 
-        # 连接信号
+        # Connect signals
         self.btn_prev.clicked.connect(self.goto_prev)
         self.btn_next.clicked.connect(self.goto_next)
         self.btn_clear.clicked.connect(self.clear_current)
@@ -309,75 +292,75 @@ class MainWindow(QMainWindow):
         self.btn_pass.clicked.connect(self.mark_pass)
         self.btn_positive.clicked.connect(self.save_positive_sample)
 
-        # 同步滑动条和数字框
+        # Synchronize slider and spin box
         self.brush_slider.valueChanged.connect(self.brush_spinbox.setValue)
         self.brush_spinbox.valueChanged.connect(self.brush_slider.setValue)
 
-        # 初始化日志
-        self.log("标注工具已启动")
+        # Initialize log
+        self.log("Annotation tool started")
         
-        # 加载第一张图像
+        # Load first image
         self.load_current()
 
     def log(self, message):
-        """在日志区域添加消息"""
+        """Add message to log area"""
         timestamp = datetime.now().strftime("%H:%M:%S")
         formatted_msg = f"[{timestamp}] {message}"
         self.log_area.append(formatted_msg)
-        # 自动滚动到底部
+        # Auto scroll to bottom
         cursor = self.log_area.textCursor()
         cursor.movePosition(cursor.MoveOperation.End)
         self.log_area.setTextCursor(cursor)
 
     def setup_fonts(self):
-        """设置统一的中文字体"""
+        """Set unified font"""
         self.chinese_font = QFont()
         chinese_fonts = "SimSun"
         self.chinese_font.setFamily(chinese_fonts)
         self.chinese_font.setPointSize(10)
         self.chinese_font.setWeight(QFont.Weight.Normal)
         
-        # 设置应用程序默认字体
+        # Set application default font
         QApplication.instance().setFont(self.chinese_font)
 
     def on_brush_size_changed(self, value):
-        """刷子大小改变时的处理"""
+        """Handle brush size change"""
         self.view.set_brush_size(value)
 
     def load_current(self):
-        """加载当前图像"""
+        """Load current image"""
         idx = self.pending[self.cur]
         row = self.rows[idx]
-        # 解析路径
+        # Parse path
         p = Path(row[self.path_col])
         if not p.exists():
-            p = img_dir / Path(row[self.path_col]).name
+            p = self.dataInfo.images_dir / Path(row[self.path_col]).name
         if not p.exists():
             QMessageBox.critical(self, "Error", f"Image not found:\n{row[self.path_col]}")
             sys.exit(1)
         self.current_path = p
         self.view.load_image(p)
         
-        # 显示更详细的状态信息
-        status_text = f"[{self.cur+1}/{len(self.pending)}] {p.name} — 状态: {row[self.status_col]}"
+        # Display detailed status information
+        status_text = f"[{self.cur+1}/{len(self.pending)}] {p.name} — Status: {row[self.status_col]}"
         self.status_label.setText(status_text)
         
-        # 记录日志
-        self.log(f"加载图像: {p.name}")
+        # Log record
+        self.log(f"Load image: {p.name}")
         
-        # 根据当前状态更新按钮可用性
+        # Update button states based on current status
         self.update_button_states()
 
     def update_button_states(self):
-        """根据当前状态更新按钮可用性"""
-        # 导航按钮
+        """Update button availability based on current status"""
+        # Navigation buttons
         self.btn_prev.setEnabled(self.cur > 0)
         self.btn_next.setEnabled(self.cur < len(self.pending) - 1)
 
     def clear_current(self):
-        """清除当前绘制内容"""
+        """Clear current drawing content"""
         self.view.clear_painting()
-        self.log("已清除绘制内容")
+        self.log("Drawing content cleared")
 
     def goto_prev(self):
         if self.cur > 0:
@@ -390,84 +373,84 @@ class MainWindow(QMainWindow):
             self.load_current()
 
     def mark_pass(self):
-        """跳过这张图像"""
+        """Skip this image"""
         idx = self.pending[self.cur]
         self.rows[idx][self.status_col] = STATUS_PASS
         self._write_csv()
         
         file_name = self.current_path.name
-        self.log(f"跳过图像: {file_name} (状态: pass)")
+        self.log(f"Skip image: {file_name} (status: pass)")
         
         self._remove_current()
 
     def save_negative_sample(self):
-        """保存负样本（全黑mask）"""
-        # 获取图像尺寸
+        """Save negative sample (all-black mask)"""
+        # Get image size
         if not self.view.pixmap_item.pixmap():
-            self.log("错误: 没有加载图像")
+            self.log("Error: No image loaded")
             return
             
         img_size = self.view.pixmap_item.pixmap().size()
         
-        # 创建全黑mask
+        # Create all-black mask
         mask_image = QImage(img_size, QImage.Format.Format_RGB32)
-        mask_image.fill(Qt.GlobalColor.black)  # 全黑
+        mask_image.fill(Qt.GlobalColor.black)  # All black
         
-        # 保存并更新状态
+        # Save and update status
         if self._save_mask_image(mask_image, STATUS_NEGATIVE):
             file_name = self.current_path.name
-            self.log(f"保存负样本: {file_name} (全黑mask)")
+            self.log(f"Save negative sample: {file_name} (all-black mask)")
             self._remove_current()
 
     def save_positive_sample(self):
-        """保存正样本（有绘制内容的mask）"""
+        """Save positive sample (mask with drawing content)"""
         mask_pixmap = self.view.get_mask_pixmap()
         if not mask_pixmap:
-            # 没有绘制内容，询问是否保存为负样本
+            # No drawing content, ask if save as negative sample
             file_name = self.current_path.name
-            self.log(f"无绘制内容: {file_name} - 自动保存为负样本")
+            self.log(f"No drawing content: {file_name} - auto save as negative sample")
             self.save_negative_sample()
             return
 
-        # 保存并更新状态
+        # Save and update status
         if self._save_mask_image(mask_pixmap.toImage(), STATUS_POSITIVE):
             file_name = self.current_path.name
-            self.log(f"保存正样本: {file_name} (包含绘制区域)")
+            self.log(f"Save positive sample: {file_name} (contains drawing area)")
             self._remove_current()
 
     def _save_mask_image(self, mask_image, status):
-        """保存mask图像并更新CSV状态"""
-        # 生成保存文件名
+        """Save mask image and update CSV status"""
+        # Generate save filename
         base_name = self.current_path.stem
         out_name = f"{base_name}_mask.png"
-        out_path = mask_dir / out_name
+        out_path = self.dataInfo.masks_dir / out_name
         
-        # 保存mask
+        # Save mask
         success = mask_image.save(str(out_path))
         if not success:
-            self.log(f"保存失败: 无法保存mask到 {out_path}")
+            self.log(f"Save failed: Unable to save mask to {out_path}")
             return False
 
-        # 更新CSV
+        # Update CSV
         idx = self.pending[self.cur]
         self.rows[idx][self.status_col] = status
         
-        # 添加mask路径列（如果不存在）
+        # Add mask path column (if not exists)
         if 'mask_path' not in self.fieldnames:
             self.fieldnames.append('mask_path')
         
-        # 使用相对路径
+        # Use relative path
         try:
             self.rows[idx]['mask_path'] = str(out_path)
         except ValueError:
             # print error in log box
-            self.log(f"错误: 无法设置mask路径 {out_path} (行 {idx})")
+            self.log(f"Error: Unable to set mask path {out_path} (row {idx})")
             
         self._write_csv()
         return True
 
     def _remove_current(self):
-        """处理完当前图像后移除并继续"""
+        """Remove current item after processing and continue"""
         self.pending.pop(self.cur)
         remaining = len(self.pending)
         
@@ -475,17 +458,17 @@ class MainWindow(QMainWindow):
             self.cur = remaining - 1
             
         if not self.pending:
-            self.log("全部完成: 所有图像标注完成！")
-            QMessageBox.information(self, "全部完成", "所有图像标注完成！")
+            self.log("All completed: All image annotation completed!")
+            QMessageBox.information(self, "All Completed", "All image annotation completed!")
             QApplication.quit()
             return
             
-        self.log(f"剩余待处理图像: {remaining} 张")
+        self.log(f"Remaining images to process: {remaining}")
         self.load_current()
 
     def _write_csv(self):
-        """写入CSV文件"""
-        with open(csv_path, 'w', newline='', encoding='utf-8') as f:
+        """Write CSV file"""
+        with open(self.dataInfo.meta_file, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=self.fieldnames)
             writer.writeheader()
             writer.writerows(self.rows)

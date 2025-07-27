@@ -11,9 +11,9 @@ Pure training script built on top of your existing code (train/val loaders alrea
 import os
 import re
 import math
+import numpy as np
 import pandas as pd
 from pathlib import Path
-from sklearn.model_selection import train_test_split
 
 import torch
 import torch.nn as nn
@@ -22,9 +22,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-import albumentations as A
-from albumentations.pytorch import ToTensorV2
-from dataSizeMap import DatasetSizeMap
+from dataPrepare import ReadDataset
 
 import logging
 from typing import Dict, Any, Tuple
@@ -35,8 +33,9 @@ from unet import UNet
 #                                      CONFIG
 # ----------------------------------------------------------------------------------
 CONFIG: Dict[str, Any] = {
-    "epochs": 100,                                      # total epochs
+    "epochs": 200,                                      # total epochs
     "early_stop_patience": 15,                          # e.g. 15 or None to disable
+    "min_delta": 1e-3,                                  # minimum change to qualify as an improvement
     ## learning rate & scheduler
     "learning_rate": 1e-4,
     "scheduler": "plateau",                             # none | plateau | cosine
@@ -45,8 +44,8 @@ CONFIG: Dict[str, Any] = {
     "cosine_Tmax": 50,
     "amp": True,
     ## model
-    "batch_size": 32,                                   # batch size per GPU
-    "n_channels": 1,                                    # input channels, e.g. 1 for grayscale
+    "batch_size": 8,                                   # batch size per GPU
+    "n_channels": 3,                                    # input channels, 3 for RGB (changed from 1)
     "num_classes": 1,                                   # 1 -> binary, >1 -> multiclass
     ## training and optimizer
     "optimizer": "adamw",                               # adam | adamw | rmsprop | sgd
@@ -69,6 +68,7 @@ DEVICE = torch.device("cuda:8" if torch.cuda.is_available() else "cpu")
 # ----------------------------------------------------------------------------------
 #                               LOSS & METRICS
 # ----------------------------------------------------------------------------------
+
 
 @torch.no_grad()
 def dice_coeff(prob: torch.Tensor, target: torch.Tensor, eps: float = 1e-6, multiclass: bool = False) -> torch.Tensor:
@@ -104,7 +104,8 @@ def validate(model: nn.Module, loader: DataLoader, cfg: Dict[str, Any]) -> Tuple
     # 根据任务类型选用二分类或多分类交叉熵损失
     criterion = nn.BCEWithLogitsLoss() if cfg["num_classes"] == 1 else nn.CrossEntropyLoss()
     for batch in loader:
-        imgs, masks = DatasetSizeMap.unpack(batch)
+        # ReadDataset 返回 (image_tensor, mask_tensor, label_str)
+        imgs, masks, labels = batch
         # 将 C 通道 存储在最后一个维度 torch.channels_last
         # 由于模型还在cuda 上，所以需要将数据也转移到cuda上 以便于validation
         # 必须先做 imgs = imgs.to(DEVICE)，把图像张量搬到 GPU，才能进行后面的前向/反向计算。
@@ -124,11 +125,12 @@ def validate(model: nn.Module, loader: DataLoader, cfg: Dict[str, Any]) -> Tuple
                 # masks.shape == (N, 1, H, W) -> (N, H, W) by squeeze(1) squeeze the channel dimension
                 ce = criterion(logits.squeeze(1), masks.squeeze(1))
                 dsc = dice_loss_from_logits(logits, masks, multiclass=False)
+                loss = ce + dsc
             else:
                 ce = criterion(logits, masks)
                 dsc = dice_loss_from_logits(logits, masks, multiclass=True)
-            # 计算总损失
-            loss = ce + dsc
+                # 计算总损失
+                loss = ce + dsc
 
             # 计算 dice 系数 计算指标，不参与梯度 越接近 1 表示重叠越好
             if cfg["num_classes"] == 1:
@@ -255,8 +257,8 @@ def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, cf
 
         # 遍历训练集 DataLoader，每次取出一个 batch。
         for batch in train_loader:
-            # 解包 batch 数据
-            imgs, masks = DatasetSizeMap.unpack(batch)
+            # ReadDataset 返回 (image_tensor, mask_tensor, label_str)
+            imgs, masks, labels = batch
             # 将图像张量搬到 GPU，并设置为 channels_last 格式
             imgs = imgs.to(DEVICE, dtype=torch.float32, memory_format=torch.channels_last)
             if cfg["num_classes"] == 1:
@@ -367,7 +369,7 @@ def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, cf
                 scheduler.step()
 
         # save
-        is_best = val_dice > best_dice
+        is_best = val_dice > best_dice + cfg["min_delta"]
         if is_best:
             best_dice = val_dice
             no_improve = 0
@@ -434,45 +436,57 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
     logging.info(f"Device: {DEVICE}")
 
-    test_id = "1"
-    test_name = "phantom_taobao"
-    BASE_DIR = Path(f"data/{test_name}")
-    CSV_PATH = BASE_DIR / f"meta_{test_name}_{test_id}_augmented.csv"
-    IMAGES_DIR = BASE_DIR / "images"
-    IMAGES_AUG_DIR = BASE_DIR / "images_augmented"
-    MASKS_DIR = BASE_DIR / "masks"
-    MASK_AUG_DIR = BASE_DIR / "masks_augmented"
-    OUTPUT_DIR = Path("outputs")
-    TRAIN_DIR = OUTPUT_DIR / "train.csv"
-    VAL = OUTPUT_DIR / "val.csv"
-    TEST_DIR = OUTPUT_DIR / "test.csv"
-
-    # Get the dataloaders
-    transform_train = A.Compose([
-        A.Normalize(mean=(0.5,), std=(0.5,)),
-        ToTensorV2(),
-    ])
-
-    transform_val = A.Compose([
-        A.Normalize(mean=(0.5,), std=(0.5,)),
-        ToTensorV2(),
-    ])
-
-    train_df = pd.read_csv(TRAIN_DIR)
-    train_ds = DatasetSizeMap(train_df, transform_train)
-    validation_df = pd.read_csv(VAL)
-    validation_ds = DatasetSizeMap(validation_df, transform_val)
-    train_loader = DataLoader(train_ds, batch_size=CONFIG["batch_size"], shuffle=True, num_workers=4)
-    validation_loader = DataLoader(validation_ds, batch_size=CONFIG["batch_size"], shuffle=False, num_workers=4)
+    # 使用 ReadDataset 直接加载处理好的数据
+    print("=" * 60)
+    print("初始化数据加载器")
+    print("=" * 60)
+    
+    # 创建训练集数据加载器 - 使用平衡采样
+    print("加载训练数据集...")
+    train_ds = ReadDataset(
+        dataset_type='train', 
+        batch_size=CONFIG["batch_size"], 
+        auto_load=True, 
+        balanced_sampling=True  # 训练时使用平衡采样，让每个batch中positive/negative样本均匀分布
+    )
+    train_loader = train_ds.get_dataloader(shuffle=False, num_workers=4)  # 平衡采样时不需要额外shuffle
+    
+    # 创建验证集数据加载器 - 不使用平衡采样
+    print("加载验证数据集...")
+    validation_ds = ReadDataset(
+        dataset_type='val', 
+        batch_size=CONFIG["batch_size"], 
+        auto_load=True, 
+        balanced_sampling=True  # 验证时也使用平衡采样
+    )
+    validation_loader = validation_ds.get_dataloader(shuffle=False, num_workers=4)
+    
+    # 打印数据集信息
+    print("\n训练集信息:")
+    train_ds.print_basic_info()
+    
+    print("\n验证集信息:")
+    validation_ds.print_basic_info()
 
     try:
         train_loader
         validation_loader
+        print(f"\n数据加载器创建成功!")
+        print(f"训练批次数: {len(train_loader)}")
+        print(f"验证批次数: {len(validation_loader)}")
     except NameError:
-        raise RuntimeError("train_loader / validation_loader 未定义，请在此文件上方粘贴你创建 DataLoader 的代码或在 import 前构建好它们。")
+        raise RuntimeError("train_loader / validation_loader 未定义，请检查 ReadDataset 加载是否成功。")
 
+    # 创建模型
+    print(f"\n创建 U-Net 模型 (输入通道: {CONFIG['n_channels']}, 输出类别: {CONFIG['num_classes']})")
     model = UNet(n_channels=CONFIG["n_channels"], n_classes=CONFIG["num_classes"], bilinear=CONFIG["bilinear"])
     model = model.to(DEVICE, memory_format=torch.channels_last)
+    
+    # 显示模型参数数量
+    total_params = sum(p.numel() for p in model.parameters())
+    trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"模型参数总数: {total_params:,}")
+    print(f"可训练参数: {trainable_params:,}")
 
     # 可选：小显存时用 checkpointing（如果你的 UNet 实现里有这个方法）
     # if hasattr(model, 'use_checkpointing') and torch.cuda.is_available():
@@ -481,4 +495,15 @@ if __name__ == "__main__":
     #         logging.info("VRAM < 6GB, enabling gradient checkpointing")
     #         model.use_checkpointing()
 
+    print("\n" + "=" * 60)
+    print("开始训练")
+    print("=" * 60)
+    
+    # 开始训练
     train(model, train_loader, validation_loader, CONFIG)
+    
+    # 关闭数据集
+    train_ds.close()
+    validation_ds.close()
+    
+    print("训练完成，数据集已关闭。")

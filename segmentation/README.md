@@ -41,12 +41,3 @@ In linux if `qt.qpa.plugin: Could not load the Qt platform plugin "wayland" in "
 // Run this command in terminal before running the python script
 export QT_QPA_PLATFORM=xcb
 ```
-
-我一个超声灰度图像血管分割模型有正负样本
-负样本是不同的背景噪声，然后mask都设置为0
-对于正样本有正常血管的部分设置才设置为1. 
-负样本占10%左右
-    1. 正负样本在不同数据集以及batch平均后后，loss很高在0.45 dice 在0.5多 
-    2. 正负样本不同数据集以及batch不平均loss很高在0.25 dice 在0.7多 
-这种效果都是很差的
-考虑几个方面对于高于mask设定阈值比如说概率70%以上就算是正确的了，没必要把loss和dice算那么高把，你觉得呢。或者loss有没有更出色符合需求的更新方法

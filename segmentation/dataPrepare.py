@@ -36,8 +36,8 @@ class AugmentedDataset(DataInfo):
             A.Resize(self.target_size[0], self.target_size[1], 
             interpolation=cv2.INTER_AREA, p=1.0),
             A.RandomBrightnessContrast(
-                brightness_limit=(-0.2, 0.2),
-                contrast_limit=(-0.2, 0.2),
+                brightness_limit=(-0.1, 0.1),
+                contrast_limit=(-0.1, 0.1),
                 p=0.6
             ),
             A.GaussNoise(std_range=(0.05, 0.1), p=0.3),

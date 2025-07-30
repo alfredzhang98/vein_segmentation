@@ -16,8 +16,8 @@ class DataInfo:
         self.masks_aug_dir  = self.base_dir / "masks_aug"
         self.meta_file      = self.base_dir / f"meta_{self.test_name}_{self.test_id}.csv"
         self.target_aug_times = {
-            "true": 16,
-            "test": 1
+            "true": 20,
+            # "test": 1
         }
         self.mask_class = {"background": 0, "vein": 255, "nerve": 128}
         self.mask_class_map= {0: 0, 255: 1, 128: 2}

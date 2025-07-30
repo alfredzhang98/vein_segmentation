@@ -11,6 +11,7 @@ Pure training script built on top of your existing code (train/val loaders alrea
 import os
 import re
 import math
+import sys
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -44,8 +45,8 @@ CONFIG: Dict[str, Any] = {
     "cosine_Tmax": 50,
     "amp": True,
     ## model
-    "batch_size": 8,                                   # batch size per GPU
-    "n_channels": 3,                                    # input channels, 3 for RGB (changed from 1)
+    "batch_size": 32,                                   # batch size per GPU
+    "n_channels": 1,                                    # input channels, 1 for grayscale ultrasound images
     "num_classes": 1,                                   # 1 -> binary, >1 -> multiclass
     ## training and optimizer
     "optimizer": "adamw",                               # adam | adamw | rmsprop | sgd
@@ -71,19 +72,44 @@ DEVICE = torch.device("cuda:8" if torch.cuda.is_available() else "cpu")
 
 
 @torch.no_grad()
-def dice_coeff(prob: torch.Tensor, target: torch.Tensor, eps: float = 1e-6, multiclass: bool = False) -> torch.Tensor:
-    if not multiclass:  
-        # prob/target: (N,1,H,W)
-        intersection = (prob * target).sum(dim=(2, 3))
-        union = prob.sum(dim=(2, 3)) + target.sum(dim=(2, 3))
-        dice = (2. * intersection + eps) / (union + eps)
-        return dice.mean()
-    else:               
-        # one-hot both: (N,C,H,W)
-        intersection = (prob * target).sum(dim=(2, 3))
-        union = prob.sum(dim=(2, 3)) + target.sum(dim=(2, 3))
-        dice = (2. * intersection + eps) / (union + eps)
-        return dice.mean()
+def dice_coeff(prob: torch.Tensor, target: torch.Tensor, eps: float = 1e-6, multiclass: bool = False, reduce_batch_first: bool = False) -> torch.Tensor:
+    """
+    Calculate Dice coefficient for semantic segmentation
+    
+    Args:
+        prob: Predicted probabilities tensor
+        target: Ground truth tensor  
+        eps: Small epsilon to avoid division by zero
+        multiclass: Whether this is multiclass segmentation
+        reduce_batch_first: Whether to reduce batch dimension first
+    
+    Returns:
+        Dice coefficient as tensor
+    """
+    # Ensure input and target have same size
+    assert prob.size() == target.size(), f"Size mismatch: prob {prob.size()} vs target {target.size()}"
+    assert prob.dim() == 3 or not reduce_batch_first, "reduce_batch_first requires at least 3D tensors"
+    
+    if not multiclass:
+        # Binary segmentation: prob/target shape (N,1,H,W) or (N,H,W)
+        if prob.dim() == 4:  # (N,1,H,W)
+            sum_dim = (-1, -2) if not reduce_batch_first else (-1, -2, -3)
+        else:  # (N,H,W) 
+            sum_dim = (-1, -2) if prob.dim() == 2 or not reduce_batch_first else (-1, -2, -3)
+    else:
+        # Multiclass segmentation: one-hot encoded (N,C,H,W)
+        sum_dim = (-1, -2) if not reduce_batch_first else (-1, -2, -3)
+    
+    # Calculate intersection and union
+    inter = 2 * (prob * target).sum(dim=sum_dim)
+    sets_sum = prob.sum(dim=sum_dim) + target.sum(dim=sum_dim)
+    
+    # Handle edge case where both prob and target are zero
+    sets_sum = torch.where(sets_sum == 0, inter, sets_sum)
+    
+    # Calculate Dice coefficient
+    dice = (inter + eps) / (sets_sum + eps)
+    return dice.mean()
 
 def dice_loss_from_logits(logits: torch.Tensor, target: torch.Tensor, multiclass: bool) -> torch.Tensor:
     if multiclass:
@@ -104,8 +130,8 @@ def validate(model: nn.Module, loader: DataLoader, cfg: Dict[str, Any]) -> Tuple
     # 根据任务类型选用二分类或多分类交叉熵损失
     criterion = nn.BCEWithLogitsLoss() if cfg["num_classes"] == 1 else nn.CrossEntropyLoss()
     for batch in loader:
-        # ReadDataset 返回 (image_tensor, mask_tensor, label_str)
-        imgs, masks, labels = batch
+        # ReadDataset 返回 (image_tensor, mask_tensor, image_type)
+        imgs, masks, image_type = batch
         # 将 C 通道 存储在最后一个维度 torch.channels_last
         # 由于模型还在cuda 上，所以需要将数据也转移到cuda上 以便于validation
         # 必须先做 imgs = imgs.to(DEVICE)，把图像张量搬到 GPU，才能进行后面的前向/反向计算。
@@ -257,8 +283,8 @@ def train(model: nn.Module, train_loader: DataLoader, val_loader: DataLoader, cf
 
         # 遍历训练集 DataLoader，每次取出一个 batch。
         for batch in train_loader:
-            # ReadDataset 返回 (image_tensor, mask_tensor, label_str)
-            imgs, masks, labels = batch
+            # ReadDataset 返回 (image_tensor, mask_tensor, image_type)
+            imgs, masks, image_type = batch
             # 将图像张量搬到 GPU，并设置为 channels_last 格式
             imgs = imgs.to(DEVICE, dtype=torch.float32, memory_format=torch.channels_last)
             if cfg["num_classes"] == 1:
@@ -441,32 +467,30 @@ if __name__ == "__main__":
     print("初始化数据加载器")
     print("=" * 60)
     
-    # 创建训练集数据加载器 - 使用平衡采样
+    # 创建训练集数据加载器
     print("加载训练数据集...")
     train_ds = ReadDataset(
         dataset_type='train', 
-        batch_size=CONFIG["batch_size"], 
-        auto_load=True, 
-        balanced_sampling=True  # 训练时使用平衡采样，让每个batch中positive/negative样本均匀分布
+        batch_size=CONFIG["batch_size"]
     )
-    train_loader = train_ds.get_dataloader(shuffle=False, num_workers=4)  # 平衡采样时不需要额外shuffle
+    train_loader = train_ds.get_dataloader(shuffle=True)  # 训练集需要打乱
     
-    # 创建验证集数据加载器 - 不使用平衡采样
+    # 创建验证集数据加载器
     print("加载验证数据集...")
     validation_ds = ReadDataset(
-        dataset_type='val', 
-        batch_size=CONFIG["batch_size"], 
-        auto_load=True, 
-        balanced_sampling=True  # 验证时也使用平衡采样
+        dataset_type='validation', 
+        batch_size=CONFIG["batch_size"]
     )
-    validation_loader = validation_ds.get_dataloader(shuffle=False, num_workers=4)
+    validation_loader = validation_ds.get_dataloader(shuffle=False)  # 验证集不需要打乱
     
     # 打印数据集信息
-    print("\n训练集信息:")
-    train_ds.print_basic_info()
+    print(f"\n训练集信息: {len(train_ds)} 样本")
+    train_class_weights = train_ds.get_class_weights()
+    print("训练集类别权重:", train_class_weights)
     
-    print("\n验证集信息:")
-    validation_ds.print_basic_info()
+    print(f"\n验证集信息: {len(validation_ds)} 样本")
+    val_class_weights = validation_ds.get_class_weights()
+    print("验证集类别权重:", val_class_weights)
 
     try:
         train_loader
@@ -482,18 +506,10 @@ if __name__ == "__main__":
     model = UNet(n_channels=CONFIG["n_channels"], n_classes=CONFIG["num_classes"], bilinear=CONFIG["bilinear"])
     model = model.to(DEVICE, memory_format=torch.channels_last)
     
-    # 显示模型参数数量
     total_params = sum(p.numel() for p in model.parameters())
     trainable_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"模型参数总数: {total_params:,}")
     print(f"可训练参数: {trainable_params:,}")
-
-    # 可选：小显存时用 checkpointing（如果你的 UNet 实现里有这个方法）
-    # if hasattr(model, 'use_checkpointing') and torch.cuda.is_available():
-    #     total_mem = torch.cuda.get_device_properties(0).total_memory
-    #     if total_mem < 6 * 1024**3:
-    #         logging.info("VRAM < 6GB, enabling gradient checkpointing")
-    #         model.use_checkpointing()
 
     print("\n" + "=" * 60)
     print("开始训练")
@@ -502,8 +518,4 @@ if __name__ == "__main__":
     # 开始训练
     train(model, train_loader, validation_loader, CONFIG)
     
-    # 关闭数据集
-    train_ds.close()
-    validation_ds.close()
-    
-    print("训练完成，数据集已关闭。")
+    print("训练完成。")

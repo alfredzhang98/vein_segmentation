@@ -15,11 +15,11 @@ from DataInfo import DataInfo
 
 # Load Clarius libraries
 if sys.platform.startswith("linux"):
-    libcast_handle = ctypes.CDLL("./libcast.so", ctypes.RTLD_GLOBAL)._handle
-    pyclariuscast = ctypes.cdll.LoadLibrary("./pyclariuscast.so")
-else:
-    import pyclariuscast
+    libcast_handle = ctypes.CDLL("./libcast.so", ctypes.RTLD_GLOBAL)._handle  # load the libcast.so shared library
+    pyclariuscast = ctypes.cdll.LoadLibrary("./pyclariuscast.so")  # load the pyclariuscast.so shared library
 
+
+import pyclariuscast
 # Configuration
 IP = "192.168.1.108"
 PORT = 5828
@@ -439,6 +439,7 @@ class MainWidget(QtWidgets.QMainWindow):
             if self.cast.isConnected():
                 self.cast.disconnect()
             if sys.platform.startswith("linux"):
+                # unload the shared library before destroying the cast object
                 ctypes.CDLL("libc.so.6").dlclose(libcast_handle)
             self.cast.destroy()
         except Exception as e:

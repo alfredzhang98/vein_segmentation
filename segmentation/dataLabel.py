@@ -7,7 +7,6 @@ Features:
 - Adjustable brush size
 - Real-time red display of drawing area
 - Save binary mask images
-- Support for positive/negative/pass/ND status marking
 - Fixed color overlay issues
 - Fixed mask color issues and simplified operation flow
 """
@@ -24,7 +23,8 @@ from PySide6.QtGui import QPixmap, QPainter, QPen, QBrush, QColor, QPolygonF, QF
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QPushButton, QFileDialog, QLabel, QMessageBox, QGraphicsView,
-    QGraphicsScene, QGraphicsPixmapItem, QSlider, QSpinBox, QTextEdit
+    QGraphicsScene, QGraphicsPixmapItem, QSlider, QSpinBox, QTextEdit,
+    QComboBox
 )
 
 from DataInfo import DataInfo
@@ -33,13 +33,31 @@ from DataInfo import DataInfo
 MIN_BRUSH_SIZE = 5   # Minimum brush size
 MAX_BRUSH_SIZE = 100 # Maximum brush size
 DEFAULT_BRUSH_SIZE = 20  # Default brush size
-BRUSH_COLOR = QColor(0, 255, 0, 50)  # Green semi-transparent
 
 # Status constants
 STATUS_ND = "ND"              # To be processed
-STATUS_POSITIVE = "positive"  # Positive sample (with annotation content)
-STATUS_NEGATIVE = "negative"  # Negative sample (blank annotation)
+STATUS_TRUE = "true"          # True sample (with annotation content)
+STATUS_TEST = "test"          # Test sample (blank annotation or for testing)
 STATUS_PASS = "pass"          # Skip
+
+# Brush types with colors and pixel values
+BRUSH_TYPES = {
+    "vein": {
+        "color": QColor(0, 255, 0, 50),  # Green semi-transparent
+        "pixel_value": 255,
+        "display_name": "Vein"
+    },
+    "tbd1": {
+        "color": QColor(0, 0, 255, 50),  # Blue semi-transparent
+        "pixel_value": 128,
+        "display_name": "tbd1"
+    },
+    "tbd2": {
+        "color": QColor(255, 0, 0, 50),  # Red semi-transparent
+        "pixel_value": 64,
+        "display_name": "tbd2"
+    }
+}
 # ────────────────────────────────────────────────────────────────────────────────
 
 class PaintView(QGraphicsView):
@@ -58,6 +76,8 @@ class PaintView(QGraphicsView):
         self.scene().addItem(self.paint_item)
 
         self.brush_size = DEFAULT_BRUSH_SIZE
+        # BRUSH_TYPES first item is default
+        self.current_brush_type = list(BRUSH_TYPES.keys())[0]
         self.is_painting = False
         self.last_pt = QPointF()
 
@@ -75,6 +95,15 @@ class PaintView(QGraphicsView):
 
     def set_brush_size(self, s: int):
         self.brush_size = s
+
+    def set_brush_type(self, brush_type: str):
+        """Set current brush type"""
+        if brush_type in BRUSH_TYPES:
+            self.current_brush_type = brush_type
+
+    def get_current_brush_color(self):
+        """Get current brush color"""
+        return BRUSH_TYPES[self.current_brush_type]["color"]
 
     def mousePressEvent(self, ev):
         if ev.button() == Qt.LeftButton and self.paint_pixmap:
@@ -100,7 +129,7 @@ class PaintView(QGraphicsView):
         painter = QPainter(self.paint_pixmap)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
         painter.setCompositionMode(QPainter.CompositionMode_Source)
-        painter.setBrush(QBrush(BRUSH_COLOR))
+        painter.setBrush(QBrush(self.get_current_brush_color()))
         painter.setPen(Qt.PenStyle.NoPen)
         r = self.brush_size / 2
         painter.drawEllipse(center, r, r)
@@ -125,24 +154,39 @@ class PaintView(QGraphicsView):
             self.paint_item.setPixmap(self.paint_pixmap)
 
     def get_mask_pixmap(self):
-        """Directly return binary mask: convert semi-transparent areas to white, others to black."""
+        """Return grayscale mask with different pixel values for different brush types."""
         if not self.paint_pixmap:
             return None
         
         img = self.paint_pixmap.toImage()
         h, w = img.height(), img.width()
         
-        # Fix: Use RGB32 format to create mask, then convert to grayscale
-        mask = QImage(w, h, QImage.Format.Format_RGB32)
-        mask.fill(Qt.GlobalColor.black)  # Default fill with black
+        # Create grayscale mask
+        mask = QImage(w, h, QImage.Format.Format_Grayscale8)
+        mask.fill(0)  # Fill with black (background)
         
         for y in range(h):
             for x in range(w):
                 color = img.pixelColor(x, y)
                 if color.alpha() > 0:  # Areas with drawing content
-                    mask.setPixel(x, y, QColor(255, 255, 255).rgb())  # Set to pure white
+                    # Determine brush type based on color
+                    brush_type = self._identify_brush_type(color)
+                    if brush_type:
+                        pixel_value = BRUSH_TYPES[brush_type]["pixel_value"]
+                        mask.setPixel(x, y, pixel_value)
         
         return QPixmap.fromImage(mask)
+    
+    def _identify_brush_type(self, color):
+        """Identify brush type based on color"""
+        # Compare with known brush colors (ignoring alpha)
+        for brush_type, brush_info in BRUSH_TYPES.items():
+            brush_color = brush_info["color"]
+            if (abs(color.red() - brush_color.red()) < 10 and
+                abs(color.green() - brush_color.green()) < 10 and
+                abs(color.blue() - brush_color.blue()) < 10):
+                return brush_type
+        return None
 
 
 class MainWindow(QMainWindow):
@@ -167,7 +211,7 @@ class MainWindow(QMainWindow):
         if not candidates:
             QMessageBox.critical(self, "Error",
                 "Cannot find a status column in CSV. "
-                "Add a column named mask_status (values ND/positive/negative/pass).")
+                "Add a column named mask_status.")
             sys.exit(1)
         self.status_col = candidates[0]
         
@@ -197,6 +241,21 @@ class MainWindow(QMainWindow):
         self.view = PaintView()
         vlay.addWidget(self.view, stretch=1)
 
+        # Brush type selection
+        brush_type_layout = QHBoxLayout()
+        brush_type_label = QLabel("Brush Type:")
+        brush_type_label.setFont(self.chinese_font)
+        brush_type_layout.addWidget(brush_type_label)
+        
+        self.brush_type_combo = QComboBox()
+        for brush_type, brush_info in BRUSH_TYPES.items():
+            self.brush_type_combo.addItem(brush_info["display_name"], brush_type)
+        self.brush_type_combo.currentIndexChanged.connect(self.on_brush_type_changed)
+        brush_type_layout.addWidget(self.brush_type_combo)
+        brush_type_layout.addStretch()  # Add stretch to push items to left
+        
+        vlay.addLayout(brush_type_layout)
+
         # Brush size control
         brush_layout = QHBoxLayout()
         brush_label = QLabel("Brush Size:")
@@ -225,12 +284,12 @@ class MainWindow(QMainWindow):
         self.btn_next = QPushButton("Next")
         self.btn_clear = QPushButton("Clear Drawing")
         self.btn_pass = QPushButton("Skip")
-        self.btn_negative = QPushButton("Negative")
-        self.btn_positive = QPushButton("Positive")
+        self.btn_test = QPushButton("Save as Test")
+        self.btn_true = QPushButton("Save as True")
         
         # Set button styles and fonts
         buttons = [self.btn_prev, self.btn_next, self.btn_clear, 
-                  self.btn_negative, self.btn_pass, self.btn_positive]
+                  self.btn_test, self.btn_pass, self.btn_true]
         for btn in buttons:
             btn.setFont(self.chinese_font)
         
@@ -238,8 +297,8 @@ class MainWindow(QMainWindow):
         hlay.addWidget(self.btn_next)
         hlay.addWidget(self.btn_clear)
         hlay.addWidget(self.btn_pass)
-        hlay.addWidget(self.btn_negative)
-        hlay.addWidget(self.btn_positive)
+        hlay.addWidget(self.btn_test)
+        hlay.addWidget(self.btn_true)
         vlay.addLayout(hlay)
 
         # Status display and log area
@@ -264,12 +323,12 @@ class MainWindow(QMainWindow):
         
         help_text = QLabel(
             "Operation Tips:\n"
-            "• Left-click and drag to draw area (fixed color overlay issue)\n"
+            "• Left-click and drag to draw area with selected brush type\n"
             "• Use slider or spin box to adjust brush size\n"
             "• Clear Drawing: Clear current drawing content\n"
-            "• Negative: Save all-black mask (no annotation area)\n"
-            "• Positive: Save binary mask of drawn area (with annotation area)\n"
-            "• Skip: Don't save anything, mark as pass"
+            "• Save as Test: Save current drawing state with 'test' status\n"
+            "• Save as True: Save current drawing state with 'true' status\n"
+            "• Skip: Don't save anything, mark as 'pass'"
         )
         help_text.setFont(self.chinese_font)
         help_text.setStyleSheet("""
@@ -288,9 +347,9 @@ class MainWindow(QMainWindow):
         self.btn_prev.clicked.connect(self.goto_prev)
         self.btn_next.clicked.connect(self.goto_next)
         self.btn_clear.clicked.connect(self.clear_current)
-        self.btn_negative.clicked.connect(self.save_negative_sample)
+        self.btn_test.clicked.connect(self.save_test_sample)
         self.btn_pass.clicked.connect(self.mark_pass)
-        self.btn_positive.clicked.connect(self.save_positive_sample)
+        self.btn_true.clicked.connect(self.save_true_sample)
 
         # Synchronize slider and spin box
         self.brush_slider.valueChanged.connect(self.brush_spinbox.setValue)
@@ -301,6 +360,14 @@ class MainWindow(QMainWindow):
         
         # Load first image
         self.load_current()
+
+    def on_brush_type_changed(self, index):
+        """Handle brush type change"""
+        brush_type = self.brush_type_combo.itemData(index)
+        if brush_type and brush_type in BRUSH_TYPES:
+            self.view.set_brush_type(brush_type)
+            brush_info = BRUSH_TYPES[brush_type]
+            self.log(f"Switched to {brush_info['display_name']} brush (pixel value: {brush_info['pixel_value']})")
 
     def log(self, message):
         """Add message to log area"""
@@ -383,8 +450,8 @@ class MainWindow(QMainWindow):
         
         self._remove_current()
 
-    def save_negative_sample(self):
-        """Save negative sample (all-black mask)"""
+    def save_test_sample(self):
+        """Save test sample (current drawing state as mask)"""
         # Get image size
         if not self.view.pixmap_item.pixmap():
             self.log("Error: No image loaded")
@@ -392,30 +459,49 @@ class MainWindow(QMainWindow):
             
         img_size = self.view.pixmap_item.pixmap().size()
         
-        # Create all-black mask
-        mask_image = QImage(img_size, QImage.Format.Format_RGB32)
-        mask_image.fill(Qt.GlobalColor.black)  # All black
+        # Get current mask (could be all-black if nothing drawn, or contain drawings)
+        mask_pixmap = self.view.get_mask_pixmap()
+        if mask_pixmap:
+            # Has drawing content
+            mask_image = mask_pixmap.toImage()
+        else:
+            # No drawing content, create all-black mask
+            mask_image = QImage(img_size, QImage.Format.Format_Grayscale8)
+            mask_image.fill(0)  # All black (background)
         
         # Save and update status
-        if self._save_mask_image(mask_image, STATUS_NEGATIVE):
+        if self._save_mask_image(mask_image, STATUS_TEST):
             file_name = self.current_path.name
-            self.log(f"Save negative sample: {file_name} (all-black mask)")
+            has_content = mask_pixmap is not None
+            content_desc = "with drawing content" if has_content else "all-black mask"
+            self.log(f"Save test sample: {file_name} ({content_desc})")
             self._remove_current()
 
-    def save_positive_sample(self):
-        """Save positive sample (mask with drawing content)"""
-        mask_pixmap = self.view.get_mask_pixmap()
-        if not mask_pixmap:
-            # No drawing content, ask if save as negative sample
-            file_name = self.current_path.name
-            self.log(f"No drawing content: {file_name} - auto save as negative sample")
-            self.save_negative_sample()
+    def save_true_sample(self):
+        """Save true sample (current drawing state as mask)"""
+        # Get image size
+        if not self.view.pixmap_item.pixmap():
+            self.log("Error: No image loaded")
             return
+            
+        img_size = self.view.pixmap_item.pixmap().size()
+        
+        # Get current mask (could be all-black if nothing drawn, or contain drawings)
+        mask_pixmap = self.view.get_mask_pixmap()
+        if mask_pixmap:
+            # Has drawing content
+            mask_image = mask_pixmap.toImage()
+        else:
+            # No drawing content, create all-black mask
+            mask_image = QImage(img_size, QImage.Format.Format_Grayscale8)
+            mask_image.fill(0)  # All black (background)
 
         # Save and update status
-        if self._save_mask_image(mask_pixmap.toImage(), STATUS_POSITIVE):
+        if self._save_mask_image(mask_image, STATUS_TRUE):
             file_name = self.current_path.name
-            self.log(f"Save positive sample: {file_name} (contains drawing area)")
+            has_content = mask_pixmap is not None
+            content_desc = "with drawing content" if has_content else "all-black mask"
+            self.log(f"Save true sample: {file_name} ({content_desc})")
             self._remove_current()
 
     def _save_mask_image(self, mask_image, status):

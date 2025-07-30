@@ -15,12 +15,14 @@ class DataInfo:
         self.masks_dir      = self.base_dir / "masks"
         self.masks_aug_dir  = self.base_dir / "masks_aug"
         self.meta_file      = self.base_dir / f"meta_{self.test_name}_{self.test_id}.csv"
-        self.aug_types = ["negative", "positive"]
         self.target_aug_times = {
-            "positive": 20,
+            "true": 16,
+            "test": 1
         }
-        self.mask_class = {"background": 0, "vessel": 1}
-        self.mask_class_map= {0: 0, 255: 1}
+        self.mask_class = {"background": 0, "vein": 255, "nerve": 128}
+        self.mask_class_map= {0: 0, 255: 1, 128: 2}
+
+        # This is the force resize size for the images and masks
         self.max_height = 576
         self.max_width = 544
 
@@ -49,6 +51,9 @@ class DataInfo:
         if not self.images_aug_dir.exists():
             # Create augmented images directory if it does not exist
             self.images_aug_dir.mkdir(parents=True, exist_ok=True)
+        if not self.checkpoints_dir.exists():
+            # Create checkpoints directory if it does not exist
+            self.checkpoints_dir.mkdir(parents=True, exist_ok=True)
         if not self.masks_aug_dir.exists():
             # Create augmented masks directory if it does not exist
             self.masks_aug_dir.mkdir(parents=True, exist_ok=True)
@@ -59,4 +64,3 @@ class DataInfo:
                                         "depth","gain","frequency",
                                         "bpp", "image_width","image_height", "micropixel",
                                         "test_name", "test_id", "mask_status"])
-        print("All configuration paths are valid.")

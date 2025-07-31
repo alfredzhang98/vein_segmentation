@@ -494,7 +494,7 @@ def main():
     
     # init the inferencer with a checkpoint path
     # You need to specify the correct path to your model checkpoint
-    ckpt_path = "checkpoints/best_model_v1.pth"  # Adjust this path as needed
+    ckpt_path = "ml/checkpoints/best_model_v1.pth"  # Adjust this path as needed
     try:
         inferencer = UNetInferencer(ckpt_path)
         ml_processing_enabled = True

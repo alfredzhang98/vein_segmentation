@@ -90,9 +90,7 @@ python training/inferencer.py outputs/checkpoints/your_checkpoint.pth your_image
 
 ## Real-time Demo
 
-<video src="https://github.com/alfredzhang98/vein_segmentation/raw/main/ref/mdimages/real_time.mp4" controls width="600"></video>
-
-> Real-time ultrasound vein segmentation with UNet inference overlay. If the video doesn't load, [click here to download](ref/mdimages/real_time.mp4).
+https://github.com/user-attachments/assets/f3ac8a1e-8759-4e72-b5cd-6a491dfb8b4b
 
 ## Hardware
 

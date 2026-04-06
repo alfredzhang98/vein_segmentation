@@ -60,10 +60,10 @@ pip install -r requirements.txt
 
 ### Download Data & Pretrained Weights
 
-| File | Link |
-|------|------|
-| Sample dataset | [Google Drive](TODO) |
-| Pretrained model (.pth) | [Google Drive](TODO) |
+| Resource | Link |
+|----------|------|
+| Datasets (phantom + public) | [Google Drive](https://drive.google.com/drive/folders/1LPwezlAUmxWnUo791RM3OPAhGQHq5r0v?usp=sharing) |
+| Pretrained models (.pth) | [Google Drive](https://drive.google.com/drive/folders/1YSGUPX_Ck_GIyM49vvtPI5_LDQHro7JR?usp=sharing) |
 
 Place `.pth` files in `checkpoints/` (for training/test) or `gui/ml/checkpoints/` (for GUI inference).
 
@@ -116,3 +116,51 @@ Inference on Tesla V100-PCIE-32GB
 - **Ultrasound**: Clarius HD3 L7
 - **Capture Card**: A325 (alternative to Clarius API)
 - **Calibration**: 72.35 um/px (Clarius native) / 83.78 um/px (A325 cropped)
+
+## Datasets
+
+### Phantom Datasets (self-collected)
+
+- **dataset1 (phantom_taobao)**: Commercial phantom from [Taobao](https://item.taobao.com/item.htm?id=762322402710)
+- **dataset2 (customer_3d_phantom)**: Custom-made phantom (gelatin + agar + saline)
+
+### Public Datasets
+
+- **dataset3: Common Carotid Artery Ultrasound Images** ([Mendeley Data](https://data.mendeley.com/datasets/d4xt63mgjm/1))
+  - 1100 ultrasound images + 1100 expert masks, resolution 709x749x3
+  - Mindray UMT-500Plus with L13-3s linear probe, 11 subjects
+
+- **dataset4: Carotid and Femoral Vessel Ultrasound Dataset** ([Kaggle](https://www.kaggle.com/datasets/fa8b3e1386722702d9c80a7d2d10d5d50eef20d14a604078b38d01c66fd9f356))
+  - 2203 train + 911 validation images from 105 videos, 11 volunteers
+  - Angell Pionner H20 Ultrasound Scanner
+
+> **Note**: `pretrained_06042026.pth` was trained on dataset1 + dataset2 + dataset3 only. dataset4 was **not** used during training.
+
+## License
+
+This project's source code is released under the [MIT License](LICENSE).
+
+**Third-party dataset licenses:**
+
+| Dataset | License |
+|---------|---------|
+| dataset3 (Common Carotid Artery) | CC BY 4.0 |
+| dataset4 (Carotid and Femoral Vessel) | CC BY-NC 4.0 (non-commercial use only) |
+
+If you use dataset4 in your work, it is restricted to non-commercial purposes per its license.
+
+## Citations
+
+If you use the public datasets, please cite:
+
+```bibtex
+@misc{momot2022carotid,
+  author = {Momot, Agata},
+  title  = {Common Carotid Artery Ultrasound Images},
+  year   = {2022},
+  publisher = {Mendeley Data},
+  doi    = {10.17632/d4xt63mgjm.1}
+}
+```
+
+For dataset4, see: https://link.springer.com/chapter/10.1007/978-3-031-72083-3_61

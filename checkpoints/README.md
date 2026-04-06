@@ -1,0 +1,1 @@
+Please put the *.pth files in the outputs/checkpoints (this) directory.

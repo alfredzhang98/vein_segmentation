@@ -1,26 +1,32 @@
-# avoid dcm files
-*.dcm
-
-# Mac OS specific files
-.DS_Store
-
-# Python cache files
+# Python
 __pycache__/
+*.pyc
+*.egg-info/
+dist/
+build/
 
-# zip files
+# OS
+.DS_Store
+Thumbs.db
+
+# Data files (large, user-generated)
+*.npz
+*.dcm
 *.zip
 
-# ignore pth
+# Images (user-collected data)
+data/*/images/*.png
+data/*/masks/*.png
+data/*/images_aug/*.png
+data/*/masks_aug/*.png
+
+# Model weights (downloaded separately)
 *.pth
 
-# ignore png files
-*.png
-
-# expect the png files in the ref directory (all subdirectories)
+# Keep reference images
 !ref/**/*.png
+!ref/**/*.gif
 
-# only ignore png files in segmentation directory
-!segmentation/*.png
-
-# ignore npz
-*.npz
+# IDE
+.vscode/
+.idea/

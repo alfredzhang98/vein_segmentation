@@ -50,6 +50,23 @@ vein_segmentation/
 6. Deploy     gui/ or handler_us.py                  ->  real-time inference
 ```
 
+## Installation
+
+```bash
+git clone --recursive https://github.com/alfredzhang98/vein_segmentation.git
+cd vein_segmentation
+pip install -r requirements.txt
+```
+
+### Download Data & Pretrained Weights
+
+| File | Link |
+|------|------|
+| Sample dataset | [Google Drive](TODO) |
+| Pretrained model (.pth) | [Google Drive](TODO) |
+
+Place `.pth` files in `checkpoints/` (for training/test) or `gui/ml/checkpoints/` (for GUI inference).
+
 ## Quick Start
 
 ```bash

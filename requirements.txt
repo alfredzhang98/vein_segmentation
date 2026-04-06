@@ -1,0 +1,25 @@
+# Core ML
+torch>=2.0
+torchvision>=0.15
+
+# Image processing & augmentation
+opencv-python>=4.8
+albumentations>=1.3
+Pillow>=10.0
+numpy>=1.24
+scipy>=1.10
+
+# Data handling
+pandas>=2.0
+
+# UI
+PySide6>=6.5
+
+# Training utilities
+tqdm>=4.65
+wandb>=0.15
+matplotlib>=3.7
+
+# Windows capture card (A325) support
+pygrabber>=0.2; sys_platform == "win32"
+comtypes>=1.2; sys_platform == "win32"

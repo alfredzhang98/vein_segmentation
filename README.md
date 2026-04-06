@@ -134,9 +134,10 @@ This project is released under the [CC BY-NC 4.0 License](LICENSE) (Attribution-
 
 If you use dataset2 in your work, it is restricted to non-commercial purposes per its license.
 
-## Citations
+## References
 
-If you use the public datasets, please cite the original authors. Citation info can be found on the respective dataset pages:
-
-- dataset1: [Mendeley Data](https://data.mendeley.com/datasets/d4xt63mgjm/1)
-- dataset2: [Springer](https://link.springer.com/chapter/10.1007/978-3-031-72083-3_61)
+- **UNet Architecture**: [milesial/Pytorch-UNet](https://github.com/milesial/Pytorch-UNet)
+- **dataset1 — Common Carotid Artery Ultrasound Images**: [Mendeley Data](https://data.mendeley.com/datasets/d4xt63mgjm/1)
+- **dataset2 — Carotid and Femoral Vessel Ultrasound Dataset**: [Springer](https://link.springer.com/chapter/10.1007/978-3-031-72083-3_61)
+- **Albumentations (data augmentation)**: [albumentations-team/albumentations](https://github.com/albumentations-team/albumentations)
+- **WandB (experiment tracking)**: [wandb.ai](https://wandb.ai)

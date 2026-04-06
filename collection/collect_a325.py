@@ -97,7 +97,8 @@ class SavePreviewDialog(QtWidgets.QDialog):
 class MainWidget(QtWidgets.QMainWindow):
     def __init__(self):
         super().__init__()
-        self.datainfo = DataInfo(test_name="customer_3d_phantom", test_id="1")
+        self.datainfo = DataInfo(test_name="phantom_2", test_id="1")
+        self.datainfo.ensure_dirs()
 
         # Ensure CSV header exists
         if not self.datainfo.meta_file.exists():

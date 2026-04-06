@@ -10,9 +10,9 @@ Features:
 - Numpy-backed mask for fast export (no pixel-by-pixel loop)
 
 Usage:
-    python dataLabel.py                          # default: phantom_taobao
-    python dataLabel.py customer_3d_phantom      # specify test_name
-    python dataLabel.py customer_3d_phantom 1    # specify test_name and test_id
+    python dataLabel.py                          # default: phantom_1
+    python dataLabel.py phantom_2      # specify test_name
+    python dataLabel.py phantom_2 1    # specify test_name and test_id
 """
 
 import sys
@@ -226,9 +226,10 @@ class PaintView(QGraphicsView):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, test_name="phantom_taobao", test_id="1"):
+    def __init__(self, test_name="phantom_1", test_id="1"):
         super().__init__()
         self.dataInfo = DataInfo(test_name=test_name, test_id=test_id)
+        self.dataInfo.ensure_dirs()
         self.setWindowTitle(f"Annotation Tool: {self.dataInfo.test_name} (Test {self.dataInfo.test_id})")
 
         self._setup_font()
@@ -468,8 +469,8 @@ class MainWindow(QMainWindow):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Annotation tool")
-    parser.add_argument("test_name", nargs="?", default="phantom_taobao",
-                        help="Dataset name (e.g. phantom_taobao, customer_3d_phantom)")
+    parser.add_argument("test_name", nargs="?", default="phantom_1",
+                        help="Dataset name (e.g. phantom_1, phantom_2)")
     parser.add_argument("test_id", nargs="?", default="1", help="Test ID")
     args = parser.parse_args()
 

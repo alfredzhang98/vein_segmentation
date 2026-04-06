@@ -152,6 +152,7 @@ class MainWidget(QtWidgets.QMainWindow):
     def __init__(self, cast):
         super().__init__()
         self.datainfo = DataInfo()
+        self.datainfo.ensure_dirs()
         self.cast = cast
         if not self.datainfo.meta_file.exists():
             with open(self.datainfo.meta_file, 'w', newline='') as f:

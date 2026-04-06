@@ -25,7 +25,7 @@ data/*/masks_aug/*.png
 
 # Keep reference images
 !ref/**/*.png
-!ref/**/*.gif
+!ref/**/*.mp4
 
 # IDE
 .vscode/

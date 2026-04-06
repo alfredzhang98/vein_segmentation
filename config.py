@@ -11,7 +11,7 @@ PROJECT_ROOT = Path(__file__).resolve().parent
 
 
 class DataInfo:
-    def __init__(self, test_name="phantom_taobao", test_id="1"):
+    def __init__(self, test_name="phantom_1", test_id="1"):
         self.test_id = test_id
         self.test_name = test_name
 
@@ -45,9 +45,8 @@ class DataInfo:
         self.val_npz   = self.base_dir / f"augmented_{self.test_name}_{self.test_id}_val.npz"
         self.test_npz  = self.base_dir / f"augmented_{self.test_name}_{self.test_id}_test.npz"
 
-        self._ensure_dirs()
-
-    def _ensure_dirs(self):
+    def ensure_dirs(self):
+        """Create required directories and meta CSV. Call before writing data."""
         for d in (self.base_dir, self.images_dir, self.masks_dir,
                   self.images_aug_dir, self.masks_aug_dir, self.checkpoints_dir):
             d.mkdir(parents=True, exist_ok=True)

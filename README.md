@@ -7,7 +7,7 @@ Ultrasound vein segmentation system using UNet, built for the Clarius HD3 L7 ult
 ```
 vein_segmentation/
 ├── config.py                # Shared configuration (DataInfo: paths, dataset params)
-├── handler_us.py            # Real-time ultrasound handler with ML inference
+├── .env                     # Training configuration (hyperparameters, paths)
 │
 ├── collection/              # Data acquisition & annotation
 │   ├── collect_clarius.py   # Collect images via Clarius Cast API
@@ -15,25 +15,19 @@ vein_segmentation/
 │   └── label.py             # Circular brush annotation tool (PySide6)
 │
 ├── training/                # ML training pipeline
-│   ├── prepare.py           # Data augmentation & train/val/test split
-│   ├── train.py             # UNet training (BCE + Dice loss, AMP, W&B)
-│   ├── test.py              # Model evaluation & inference
-│   ├── predict.ipynb        # Prediction notebook
-│   └── unet/                # UNet model architecture
+│   ├── dataPrepare.py       # Data augmentation & train/val/test split
+│   ├── DataInfo.py          # Dataset metadata & path configuration
+│   ├── train.py             # UNet training (BCE + Dice, AMP, multi-GPU, W&B)
+│   ├── test.py              # Model evaluation & visualization
+│   ├── inferencer.py        # Standalone inference engine (UNetInferencer)
+│   └── unet/                # UNet architecture (github.com/milesial/Pytorch-UNet)
 │
-├── gui/                     # Real-time segmentation GUI
-│   ├── main.py              # Main GUI with live inference overlay
-│   ├── us_thread.py         # Ultrasound streaming thread
-│   ├── video_recorder.py    # Video capture with inference overlay
-│   ├── pysidecaster.py      # PySide6 Clarius wrapper
-│   ├── ml/                  # Inference engine (UNetInferencer)
-│   └── assets/              # Icons & stylesheets
+├── data/                    # Datasets (see data/README.md for setup)
+│   ├── phantom_1/           # Phantom dataset (download from Google Drive)
+│   ├── phantom_2/           # Custom 3D phantom dataset (download from Google Drive)
+│   ├── dataset1/            # Common Carotid Artery (download from Mendeley)
+│   └── README.md            # Dataset download & path instructions
 │
-├── data/                    # Datasets
-│   ├── phantom_taobao/      # Primary dataset (Clarius API collected)
-│   └── customer_3d_phantom/ # Secondary dataset (A325 capture card)
-│
-├── checkpoints/             # Trained model weights (.pth)
 ├── lib/                     # Clarius Cast SDK (shared libraries & headers)
 ├── examples/                # Clarius API usage examples
 └── ref/                     # Reference docs & images
@@ -44,10 +38,10 @@ vein_segmentation/
 ```
 1. Collect    collect_clarius.py / collect_a325.py  ->  data/*/images/ + meta CSV
 2. Annotate   label.py                              ->  data/*/masks/
-3. Prepare    prepare.py                             ->  augmented NPZ files
-4. Train      train.py                               ->  checkpoints/*.pth
+3. Prepare    dataPrepare.py                         ->  augmented NPZ files
+4. Train      train.py                               ->  outputs/checkpoints/*.pth
 5. Evaluate   test.py                                ->  metrics & visualizations
-6. Deploy     gui/ or handler_us.py                  ->  real-time inference
+6. Inference  inferencer.py                          ->  standalone prediction
 ```
 
 ## Installation
@@ -62,54 +56,48 @@ pip install -r requirements.txt
 
 | Resource | Link |
 |----------|------|
-| Datasets (phantom + public) | [Google Drive](https://drive.google.com/drive/folders/1LPwezlAUmxWnUo791RM3OPAhGQHq5r0v?usp=sharing) |
+| Phantom datasets | [Google Drive](https://drive.google.com/drive/folders/1LPwezlAUmxWnUo791RM3OPAhGQHq5r0v?usp=sharing) |
 | Pretrained models (.pth) | [Google Drive](https://drive.google.com/drive/folders/1YSGUPX_Ck_GIyM49vvtPI5_LDQHro7JR?usp=sharing) |
 
-Place `.pth` files in `checkpoints/` (for training/test) or `gui/ml/checkpoints/` (for GUI inference).
+- Place `.pth` files in `outputs/checkpoints/`
+- Extract datasets directly into `data/` — see [data/README.md](data/README.md) for details
 
 ## Quick Start
 
+> **Note**: Before training, edit [`.env`](.env) to configure hyperparameters, dataset, and optionally enable [WandB](https://wandb.ai) logging (set `WANDB_ENABLE=true` and fill in your `WANDB_ENTITY`).
+
 ```bash
-# Collect data (A325 capture card)
-cd collection && python collect_a325.py
+# Prepare augmented dataset (run from project root)
+python training/dataPrepare.py --dataset phantom_1
 
-# Annotate masks
-cd collection && python label.py customer_3d_phantom
-
-# Prepare augmented dataset
-cd training && python prepare.py
-
-# Train
-cd training && python train.py
+# Train (run from project root)
+python training/train.py
 
 # Test
-cd training && python test.py
+python training/test.py --ckpt outputs/checkpoints/your_checkpoint.pth
+
+# Inference on a single image
+python training/inferencer.py outputs/checkpoints/your_checkpoint.pth your_image.png
 ```
 
 ## Results
 
-![segmentation_result](ref/mdimages/result_show.png)
+| Dataset | Test Samples | Dice | Loss | FPS |
+|---------|-------------|------|------|-----|
+| phantom_1 | 15 | 0.8035 | 0.2747 | 56.3 |
+| phantom_2 | 5 | 0.9610 | 0.0570 | 144.9 |
 
-```
-Inference on Tesla V100-PCIE-32GB
+**phantom_1**
+![phantom_1 result](ref/mdimages/result_phantom1.png)
 
-[Inference] Total samples: 290
-[Inference] Total time: 0.6602s
-[Inference] Average per image: 0.0023s
-[Inference] FPS: 439.25
-[TEST] loss: 0.0155 | dice: 0.9866
-```
+**phantom_2**
+![phantom_2 result](ref/mdimages/result_phantom2.png)
 
 ## Real-time Demo
 
-![real time demo](ref/mdimages/realtimedemo.gif)
+<video src="https://github.com/alfredzhang98/vein_segmentation/raw/main/ref/mdimages/real_time.mp4" controls width="600"></video>
 
-## GUI Screenshots
-
-<p align="center">
-  <img src="ref/mdimages/gui1.png" alt="gui1" width="45%" />
-  <img src="ref/mdimages/gui2.png" alt="gui2" width="45%" />
-</p>
+> Real-time ultrasound vein segmentation with UNet inference overlay. If the video doesn't load, [click here to download](ref/mdimages/real_time.mp4).
 
 ## Hardware
 
@@ -121,46 +109,41 @@ Inference on Tesla V100-PCIE-32GB
 
 ### Phantom Datasets (self-collected)
 
-- **dataset1 (phantom_taobao)**: Commercial phantom from [Taobao](https://item.taobao.com/item.htm?id=762322402710)
-- **dataset2 (customer_3d_phantom)**: Custom-made phantom (gelatin + agar + saline)
+Download from [Google Drive](https://drive.google.com/drive/folders/1LPwezlAUmxWnUo791RM3OPAhGQHq5r0v?usp=sharing) and extract into `data/`.
 
-### Public Datasets
+- **phantom_1**: Commercial phantom from [Taobao](https://item.taobao.com/item.htm?id=762322402710)
+- **phantom_2**: Custom-made phantom (gelatin + agar + saline)
 
-- **dataset3: Common Carotid Artery Ultrasound Images** ([Mendeley Data](https://data.mendeley.com/datasets/d4xt63mgjm/1))
-  - 1100 ultrasound images + 1100 expert masks, resolution 709x749x3
-  - Mindray UMT-500Plus with L13-3s linear probe, 11 subjects
+### Public Datasets (download separately)
 
-- **dataset4: Carotid and Femoral Vessel Ultrasound Dataset** ([Kaggle](https://www.kaggle.com/datasets/fa8b3e1386722702d9c80a7d2d10d5d50eef20d14a604078b38d01c66fd9f356))
+These datasets are **not included** in the repository. See [data/README.md](data/README.md) for download links and path setup.
+
+- **dataset1: Common Carotid Artery Ultrasound Images** — [Mendeley Data](https://data.mendeley.com/datasets/d4xt63mgjm/1) (CC BY 4.0)
+  - 1100 ultrasound images + 1100 expert masks, 709x749x3
+  - Mindray UMT-500Plus, L13-3s linear probe, 11 subjects
+
+- **dataset2: Carotid and Femoral Vessel Ultrasound Dataset** — [Kaggle](https://www.kaggle.com/datasets/fa8b3e1386722702d9c80a7d2d10d5d50eef20d14a604078b38d01c66fd9f356) (CC BY-NC 4.0)
   - 2203 train + 911 validation images from 105 videos, 11 volunteers
   - Angell Pionner H20 Ultrasound Scanner
 
-> **Note**: `pretrained_06042026.pth` was trained on dataset1 + dataset2 + dataset3 only. dataset4 was **not** used during training.
+> **Note**: `pretrained_06042026.pth` was trained on phantom_1 + phantom_2 + dataset1 only. dataset2 was **not** used during training.
 
 ## License
 
-This project's source code is released under the [MIT License](LICENSE).
+This project is released under the [CC BY-NC 4.0 License](LICENSE) (Attribution-NonCommercial).
 
 **Third-party dataset licenses:**
 
 | Dataset | License |
 |---------|---------|
-| dataset3 (Common Carotid Artery) | CC BY 4.0 |
-| dataset4 (Carotid and Femoral Vessel) | CC BY-NC 4.0 (non-commercial use only) |
+| dataset1 (Common Carotid Artery) | CC BY 4.0 |
+| dataset2 (Carotid and Femoral Vessel) | CC BY-NC 4.0 (non-commercial use only) |
 
-If you use dataset4 in your work, it is restricted to non-commercial purposes per its license.
+If you use dataset2 in your work, it is restricted to non-commercial purposes per its license.
 
 ## Citations
 
-If you use the public datasets, please cite:
+If you use the public datasets, please cite the original authors. Citation info can be found on the respective dataset pages:
 
-```bibtex
-@misc{momot2022carotid,
-  author = {Momot, Agata},
-  title  = {Common Carotid Artery Ultrasound Images},
-  year   = {2022},
-  publisher = {Mendeley Data},
-  doi    = {10.17632/d4xt63mgjm.1}
-}
-```
-
-For dataset4, see: https://link.springer.com/chapter/10.1007/978-3-031-72083-3_61
+- dataset1: [Mendeley Data](https://data.mendeley.com/datasets/d4xt63mgjm/1)
+- dataset2: [Springer](https://link.springer.com/chapter/10.1007/978-3-031-72083-3_61)

@@ -84,13 +84,8 @@ python training/inferencer.py outputs/checkpoints/your_checkpoint.pth your_image
 
 | Dataset | Test Samples | Dice | Loss | FPS |
 |---------|-------------|------|------|-----|
-| phantom_1 | 15 | 0.8035 | 0.2747 | 56.3 |
 | phantom_2 | 5 | 0.9610 | 0.0570 | 144.9 |
 
-**phantom_1**
-![phantom_1 result](ref/mdimages/result_phantom1.png)
-
-**phantom_2**
 ![phantom_2 result](ref/mdimages/result_phantom2.png)
 
 ## Real-time Demo

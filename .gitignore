@@ -1,32 +1,57 @@
+# ---------------------------------------------------------------------------
 # Python
+# ---------------------------------------------------------------------------
 __pycache__/
 *.pyc
 *.egg-info/
 dist/
 build/
+.ipynb_checkpoints/
 
-# OS
+# ---------------------------------------------------------------------------
+# OS / IDE
+# ---------------------------------------------------------------------------
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/
+.claude/
 
-# Data files (large, user-generated)
+# ---------------------------------------------------------------------------
+# Datasets — never tracked. They are large, and two of the four are
+# redistributed under licences that forbid mirroring them here.
+# See data/README.md for how to obtain and place each one.
+#
+# Only data/datasets/ is excluded. The rest of data/ — the collection scripts,
+# the preprocessing pipeline, the Clarius SDK and the sample frames — is code
+# and IS tracked.
+# ---------------------------------------------------------------------------
+data/datasets/*
+!data/datasets/.gitkeep
+
+# ---------------------------------------------------------------------------
+# Model weights. Each architecture keeps its own models/<arch>/checkpoints/;
+# the directory is tracked so a fresh clone has somewhere to write, the
+# weights inside it are not.
+# ---------------------------------------------------------------------------
+models/*/checkpoints/*
+!models/*/checkpoints/.gitkeep
+
+# ---------------------------------------------------------------------------
+# Regenerable diagnostics under results/. Everything else in results/ — the
+# READMEs, the plotting scripts and the published figures — IS tracked, which
+# is the point of the directory.
+# ---------------------------------------------------------------------------
+results/*/predictions/
+results/*/probes/
+
+# ---------------------------------------------------------------------------
+# W&B run data
+# ---------------------------------------------------------------------------
+wandb/
+
+*.pth
 *.npz
 *.dcm
 *.zip
-
-# Images (user-collected data)
-data/*/images/*.png
-data/*/masks/*.png
-data/*/images_aug/*.png
-data/*/masks_aug/*.png
-
-# Model weights (downloaded separately)
-*.pth
-
-# Keep reference images
-!ref/**/*.png
-!ref/**/*.mp4
-
-# IDE
-.vscode/
-.idea/
+*.mat

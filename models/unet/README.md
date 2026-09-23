@@ -1,5 +1,10 @@
 # U-Net
 
+> The first S1 experiment is available in [models/temporal](../../results/temporal/RESULTS_CN.md) with [paired results](../../results/temporal/RESULTS_CN.md). Temporal benefit has not passed acceptance; v11 remains the reference. The unchanged mixed loss is shared through `models/losses.py`.
+
+
+> Cross-model temporal perception and world-model design: [shared development roadmap](../../results/temporal/RESULTS_CN.md). This directory documents the U-Net implementation, training and inference.
+
 > 中文版：[README_CN.md](README_CN.md)
 
 The segmentation model: a U-Net emitting **three channels — background, vein, artery**,
@@ -15,7 +20,7 @@ has to change.
 | [`model.py`](model.py) | The network. `UNet(n_channels, n_classes, bilinear, base_ch)` |
 | [`parts.py`](parts.py) | Its building blocks (double conv, down, up, out) |
 | [`train.py`](train.py) | Training: the partial-label loss, validation, checkpointing |
-| [`test.py`](test.py) | Held-out evaluation, post-processing, FPS |
+| [`test.py`](evaluate.py) | Held-out evaluation, post-processing, FPS |
 | [`infer.py`](infer.py) | **Deployment inference.** Self-contained — only torch / numpy / cv2 + `model.py` |
 | `checkpoints/` | Weights. Not tracked by git; `unet_v10.pth` is the released one |
 
@@ -98,8 +103,31 @@ plain Dice.
 
 ## train.py — training
 
-`train.py` takes **no command-line arguments**. Everything is read from
-[`.env`](../../.env) at the repository root, so a run is fully described by that file.
+`train.py` reads the repository [`.env`](../../.env) by default. Use
+`--config configs/train.env` for the generic four-domain, from-scratch template.
+An explicit config replaces the root `.env`; shell environment variables take
+precedence. Data and checkpoint paths are repository-relative.
+
+Use `--set KEY=VALUE [KEY=VALUE ...]` to override datasets, run names, weights
+and hyperparameters without creating another config file. Precedence is CLI overrides,
+shell variables, the selected file, then code defaults. `--show-config` prints the
+effective settings and training mode without loading data or selecting a GPU. `INIT_PATH` loads model weights only,
+whereas `RESUME_PATH` restores training state; they are mutually exclusive.
+For `reviewed_csv` datasets, validate with
+`python data/pipeline/dataPrepare.py --dataset pmc9883282 --validate-only`,
+then build caches with `--no-png` instead of `--validate-only` before training.
+
+`TRAIN_REPEATS=pmc9883282:50` overrides online draws per training original for the
+selected source. Use commas for multiple overrides; unspecified sources retain
+`aug_times_train`. Values must be positive integers and sources must be selected in
+`DATASET`. This changes sampling frequency, not augmentation strength, label semantics,
+losses or held-out splits. No NPZ rebuild is required. Checkpoints record both the
+requested overrides and the effective per-source repeats.
+
+The current five-domain rebalanced run uses 120×50 = 6,000 PMC draws out of 30,874 per
+epoch (19.4%), with the other four domains unchanged. The completed `unet_v11_balanced` run is archived as `checkpoints/unet_v11.pth`,
+beside v10. Its abandoned predecessor and empty version subdirectories were removed.
+`VAL_WEIGHTS` controls checkpoint selection, independently of training exposure.
 
 ```bash
 python models/unet/train.py
@@ -113,6 +141,7 @@ The settings you will actually touch:
 | `.env` key | Default | What it does |
 |---|---|---|
 | `DATASET` | `musv+phantom_taobao+mendeley+customer_3d_phantom` | Training set. Join with `+` to train on the union — each sub-dataset carries its own `label_mode`, and the loss routes every sample to the right supervision mode |
+| `TRAIN_REPEATS` | empty; source defaults | Online draws per training original, e.g. `pmc9883282:50`; no effect on validation/test |
 | `VAL_DATASET` | `musv,phantom_taobao+customer_3d_phantom,mendeley` | Validation sets, comma-separated. `+` pools two into one metric |
 | `VAL_WEIGHTS` | `phantom…:0.45, musv:0.45, mendeley:0.10` | Deployment priority, used to combine validation scores into the checkpoint criterion |
 | `NUM_CLASSES` | `3` | 3 = background / vein / artery. 1 = the legacy binary model |
@@ -122,7 +151,8 @@ The settings you will actually touch:
 | `BATCH_SIZE_PER_GPU` | `16` | |
 | `EPOCHS` / `EARLY_STOP_PATIENCE` | `200` / `30` | Patience must be well above `PLATEAU_PATIENCE`, or the run stops before the LR drop can take effect |
 | `RUN_NAME` | `mixav_v3_cap32` | Goes into the checkpoint filename and the W&B run name. **Change it before every experiment**, or filenames collide |
-| `RESUME_PATH` | empty | Path to a checkpoint to fine-tune from. Empty = train from scratch |
+| `INIT_PATH` | empty | Fine-tune from model weights only |
+| `RESUME_PATH` | empty | Resume model, optimizer, scheduler and epoch; mutually exclusive with INIT_PATH |
 | `FREEZE_ENCODER` | `false` | Freeze the encoder; `UNFREEZE_EPOCH` / `UNFREEZE_LAYERS` control the thaw |
 | `CHECKPOINT_DIR` | `models/unet/checkpoints` | Where weights are written |
 | `MAX_GPUS` | `1` | Keep at 1. Multi-GPU DataParallel is the only configuration ever seen to turn val loss into NaN |
@@ -145,7 +175,7 @@ them. Otherwise it falls back to `dice_vessel`.
 ## test.py — evaluation
 
 ```bash
-python models/unet/test.py --ckpt models/unet/checkpoints/unet_v10.pth \
+python models/unet/evaluate.py --ckpt models/unet/checkpoints/unet_v10.pth \
        --dataset musv mendeley customer_3d_phantom phantom_taobao
 ```
 
@@ -157,9 +187,9 @@ behaviour. Sample overlays go to `results/unet/predictions/<run>_<dataset>/`.
 |---|---|---|
 | `--ckpt` | required | Checkpoint path |
 | `--dataset` | — | One or more datasets. Join with `+` to pool into one metric, e.g. `phantom_taobao+customer_3d_phantom` |
-| `--min-area` | `0` (recommended: `150`) | Drop connected components below this area. `0` disables post-processing, so **pass `--min-area 150` to reproduce the published numbers** — the deployed pipeline filters, and the default does not. **Do not tune this on Dice** — val peaks at 450 and test at 100, both at the extremes, which is pure noise fitting. Set it physically: the smallest real vein in Mus-V is 232 px, so 150 cannot delete a real vessel |
+| `--min-area` | `4` | Joint class repair, radius-2 closing and hole filling; at most one region per class. Use 1 for very small targets; no opening. |
 | `--max-dist` | `40` | Fragments further than this from the anchor (the largest component) are deleted as false positives; closer ones are kept as part of the same vessel. Only takes effect with `--allow-fragments` |
-| `--allow-fragments` | off | Turn off keep-largest and use the distance gate instead. **The default keeps one closed region per class**, because the ground truth is single-component in 99.4% of artery frames and 90–95% of vein frames, and the centroid of two separated pieces lands in the gap between them — a location with no vessel in it, which is the robot's insertion target |
+| `--allow-fragments` | off | Experimental distance gating for nearby fragments. Default: at most one region per class, possibly none. |
 | `--vein-probe` | off | On `artery`-mode datasets (mendeley), measure how much vein the model predicts. The vein is really there but unannotated, and training never touches it, so this is a pure generalisation test |
 | `--samples` | 10 | How many overlay images to save |
 | `--no-save` | off | Skip writing overlays |
@@ -170,7 +200,7 @@ behaviour. Sample overlays go to `results/unet/predictions/<run>_<dataset>/`.
 
 ## infer.py — deployment inference
 
-Self-contained: it imports only torch, numpy, cv2 and `model.py`, so it can be copied
+Self-contained: it imports only torch, numpy, cv2 and `model.py` / `postprocess.py`, so it can be copied
 into the robot project as-is. No training-side imports, no `.env`, no dataset code.
 
 ```python
@@ -189,10 +219,10 @@ print(g["artery"]["lateral_mm"], g["artery"]["depth_mm"], g["artery"]["radius_mm
 | Method | Signature | Returns |
 |---|---|---|
 | `UNetInferencer(...)` | `(ckpt_path, device=None, fit_mode="croppad")` | Loads the checkpoint and reads `num_classes`, `base_ch`, `bilinear` from the config stored inside it |
-| `.predict(...)` | `(crop_frame, threshold=0.5, return_prob=False)` | Class-id mask on the crop-frame grid |
+| `.predict(...)` | `(crop_frame, threshold=0.5, return_prob=False, postprocess=True, min_area=4, closing_radius=2, fill_holes=True)` | Class-id mask on the crop-frame grid |
 | `.predict_png(...)` | `(path, crop=None, **kw)` | Convenience wrapper that reads a PNG first |
-| `.measure(...)` | `(mask_crop, mm_per_px, axis_x=None, skin_row=0, min_area=300)` | `{"vein": {...}, "artery": {...}}` with `lateral_mm`, `depth_mm`, `radius_mm` |
-| `.clean(...)` | `(binary, min_area=300)` — static | open → close → keep largest → drop below `min_area` |
+| `.measure(...)` | `(mask_crop, mm_per_px, axis_x=None, skin_row=0, min_area=1)` | `{"vein": {...}, "artery": {...}}` with `lateral_mm`, `depth_mm`, `radius_mm` |
+| `.clean(...)` | `(binary, min_area=1)` | Keep largest 8-connected region; preserve empty input; no morphology or hole filling. |
 | `.mm_per_px_from_depth(...)` | `(depth_cm, crop_h)` — static | Calibration constant from the scanner's depth setting |
 
 ### The geometry contract — why the mask comes back on the crop frame
@@ -232,3 +262,25 @@ dependencies. They are required to stay bit-identical to the pipeline's versions
 - [`../../results/unet/README.md`](../../results/unet/README.md) — results, experiment log, paper material
 - [`../../analysis/unet_analysis/`](../../analysis/unet_analysis/) — FPS benchmark, geometry, cross-domain probe, config summary
 - [`../../data/README.md`](../../data/README.md) — datasets and the preprocessing pipeline
+
+### Absent vessels, thin veins and display outputs
+
+`predict()` now keeps at most one region per class; use `postprocess=False` for raw predictions. Probability output bypasses cleanup. Area thresholds use the input crop grid in deployment and the evaluation grid in test.py.
+
+`predict_regions(frame)` returns `vein`, `artery`, their `vessel` union, `overlap`, `display_rgb` (blue vein / red artery / green overlap), and `vessel_rgb` (all union pixels green). Current softmax argmax classes are exclusive. `postprocess.av_outputs()` also accepts independent masks. Display id 3 is never a fourth model class or a training target.
+
+Empty and artery-only full3 annotations remain valid under the existing partial-label loss. Cleanup cannot reject a lone false positive. test.py reports absent-class false-positive frame rates and pixel counts, and empty-frame false-positive rates for full3 only (lower is better), in addition to raw/cleaned Dice. These diagnostics do not alter training or checkpoint selection. Samples include a green `_vessel.png` union view.
+
+Historical opening and 150/300 pixel cutoffs are removed; current joint repair uses local closing and hole filling. Earlier results require their original policy; see the validation/test diagnostic below for the latest behavior.
+
+## Paired checkpoint evaluation
+
+`compare.py --checkpoints <old.pth> <new.pth> --output <new-directory>` evaluates the same five test caches, reports raw and fixed-cleanup scores plus missing-class false positives, and produces JSON, CSV and an HTML image gallery. Run from the repository root. Optional flags: `--datasets`, `--split`, `--batch`. Existing report directories are never overwritten.
+
+The completed [v10/v11 comparison](../../results/unet/BASELINE_COMPARISON_CN.md) uses best epochs 19/32. Final weights are stored together as `checkpoints/unet_v10.pth` and `checkpoints/unet_v11.pth`; original checkpoint configs remain intact for provenance.
+
+## Joint postprocessing
+
+The shared default repairs minority class pixels only in a vessel component with a single class anchor and ≥0.6 ownership; then radius-2 closing and hole filling complete each region. Components below 4 pixels are removed, at most one per class survives, and empty masks stay empty. Retained opposite-class pixels are protected. No opening is used. In inference, set `min_area=1` for tiny targets, or `closing_radius=0, fill_holes=False` to disable completion. Pixel parameters depend on the image grid.
+
+`compare.py --postprocess joint` (default) reports raw / largest (legacy) / cleaned (new). Use `--postprocess largest` to reproduce the old report. Static `clean(binary)` remains deletion-only for geometry. See the [validation/test diagnostic](../../results/unet/BASELINE_COMPARISON_CN.md); this heuristic cannot guarantee correct class assignment.

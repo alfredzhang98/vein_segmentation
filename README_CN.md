@@ -1,20 +1,27 @@
-# 血管分割 (Vein Segmentation)
+# 血管分割与时序预测
 
-> English: [README.md](README.md)
+当前单帧基线为 **U-Net v11**；时序研究模型为 **双尺度 ConvGRU-U-Net**。v11 重训候选有跨域退化，未覆盖原权重；时序候选尚未通过验收。
 
-面向穿刺引导的超声血管分割，围绕 Clarius HD3 L7 探头构建。本仓库覆盖从采集到可部署模型的完整链路：采集、标注、数据集准备、训练、评估、出图，以及独立推理。
+| 内容 | 代码与训练入口 | 结果入口 |
+|---|---|---|
+| 单帧分割 | [models/unet](models/unet/README_CN.md) | [v11 重训结果](results/unet/V11_REFRESH_CN.md) · [Mus-V 视频](results/unet/generated/musv_review/index.html) |
+| 时序跟踪与预测 | [models/temporal](models/temporal/README_CN.md) | [时序结果](results/temporal/RESULTS_CN.md) · [完整视频](results/temporal/generated/video/index.html) |
+| 数据准备与标注 | [data](data/README_CN.md) | 本地清理审计：`data/audits/` |
 
-网络是一个 U-Net，输出**三个通道 —— 背景、静脉、动脉**，并在四个**对「mask 意味着什么」意见不一致**的数据集上联合训练。**解决这个不一致，而不是网络结构本身，才是本仓库的主题。**
+[目录与 Git 规则](docs/DIRECTORY_LAYOUT_CN.md) · [研究思路](docs/ultrasound_world_model.html) · [English](README.md)
 
----
+**首次 clone：[数据集下载与准备指南](data/VIDEO_DATASETS_CN.md)**，包含 Mus-V 下载链接、其他公共来源的下载命令、路径与空间要求。
+
+PMC 本地队列扩充至 362 张，人工复核后的有效数量以 metadata CSV 为准。官方原始包不含本项目人工标签，clone 也不会带上这份标注快照；排除无效帧时保留原图与 mask，不把有效空血管帧当作无效图。
 
 ## 问题，以及解决它的目标函数
 
-四个训练集标注的根本不是同一件事：
+当前五个数据集的标注语义如下：
 
 | 数据集 | mask 标了什么 | 留下什么未定 |
 |---|---|---|
 | Mus-V | 静脉和动脉，分别标注 | 无 |
+| `PMC9883282` | 318 张有效、人工确认的静脉和动脉 mask | 其余有效帧未标注，不能当作空 mask；无接触帧排除 |
 | `phantom_taobao`、`customer_3d_phantom` | 一根凝胶管 | 这根管子算静脉还是动脉 |
 | Mendeley CCA | 颈总动脉 | 颈内静脉 —— 通常就在画面里，却**没有标注** |
 
@@ -31,13 +38,13 @@ L = − (1/|Ω|) Σ_{i∈Ω} Σ_{g∈𝒢} y_{g,i} log q_{g,i}
 
 | 数据集 | `label_mode` | 划分 `𝒢` | 被监督的边缘概率 |
 |---|---|---|---|
-| Mus-V | `full3` | `{bg}, {vein}, {artery}` | 三个都监督（普通 3 类 CE + 静脉/动脉上的 Dice） |
+| Mus-V、PMC 已确认标注 | `full3` | `{bg}, {vein}, {artery}` | 三个都监督（普通 3 类 CE + 静脉/动脉上的 Dice） |
 | 仿体 | `vessel` | `{bg}, {vein, artery}` | `q = p₁ + p₂` |
 | Mendeley CCA | `artery` | `{bg, vein}, {artery}` | `q = p₂` |
 
 由此直接得到两个推论，而这两个推论正是全部要点：
 
-- 对仿体，loss **只**依赖 `p₁ + p₂`，因此这个和如何在静脉与动脉之间拆分是不受约束的 —— 拆分方式由从 Mus-V 学到的先验决定。这正是你能对着一根仿体管子问「它看起来更像静脉还是动脉」的原因。
+- 对仿体，loss **只**依赖 `p₁ + p₂`，因此这个和如何在静脉与动脉之间拆分是不受约束的；动静脉先验来自完整标注域（v10 为 Mus-V，下一轮加入 PMC）。
 - 对 CCA，loss **只**依赖 `p₂`，因此它对剩余概率如何在背景与静脉之间分配是不变的。在这里预测出一根未标注的颈内静脉，代价**恰好为零**。
 
 当 `𝒢` 只有两组时，第一项严格就是二元交叉熵，第二项退化为单个 Dice 项，于是整个表达式还原成常规的复合 BCE–Dice loss。实现在 [`models/unet/train.py`](models/unet/train.py) 的 `partial_label_loss()`；全部用 `log_softmax` 和 `logsumexp` 计算，所以 `log(p₁ + p₂)` 是精确的，在 AMP 下也安全。
@@ -46,47 +53,31 @@ L = − (1/|Ω|) Σ_{i∈Ω} Σ_{g∈𝒢} y_{g,i} log q_{g,i}
 
 ## 项目结构
 
-```
+```text
 vein_segmentation/
-├── .env                        # 全部训练超参 —— 改这里，不要改 train.py
-│
-├── data/                       # 一切和数据有关 —— 见 data/README.md
-│   ├── collection/             #   采集（Clarius Cast、A325）+ 圆刷标注工具
-│   ├── pipeline/               #   预处理、增强、NPZ 缓存、ReadDataset
-│   ├── datasets/               #   数据本体 —— 不跟踪，需自行下载
-│   ├── clarius_sdk/            #   Clarius 原生 API —— 仅采集需要，训练用不到
-│   └── samples/                #   几张示例帧，让下面的命令开箱即跑
-│
-├── models/                     # 一个架构一个自包含文件夹
-│   └── unet/                   #   U-Net（源自 milesial/Pytorch-UNet）
-│       ├── model.py  parts.py  #     网络与其构件
-│       ├── train.py            #     部分标签 loss、验证、checkpoint
-│       ├── test.py             #     留出集评估、后处理、FPS
-│       └── infer.py            #     独立推理 + 几何测量（无训练侧依赖）
-│
-├── analysis/                   # 测量，不是训练
-│   └── unet_analysis/          #   接收 U-Net checkpoint —— 见下方说明
-│       ├── bench_fps.py        #     端到端延迟 / FPS
-│       ├── summarize_model.py  #     参数与配置汇总表
-│       ├── predict_geometry.py #     mask → 质心、横向偏移、深度、半径
-│       └── probe_generalization.py   # checkpoint 的跨域探针
-│
-├── results/                    # 值得留存的产出 —— 跟踪，一个架构一个子目录
-│   └── unet/                   #   U-Net 结果
-│       ├── README.md           #     结果、实验记录与论文素材
-│       ├── README_CN.md        #     中文版
-│       ├── figure_style.py  plot_results.py  plot_segmentation_samples.py
-│       └── figures/            #     生成的图，含已发表的那张
-│
-├── gpu_utils.py                # 空闲 GPU 选择，全仓库共用
-└── wandb/                      # W&B 运行数据 —— 不跟踪
+├── configs/                  # 训练配置；temporal.json / v11_refresh.env
+├── data/
+│   ├── collection/           # 采集与标注工具
+│   ├── pipeline/             # 数据预处理代码，保留此目录
+│   ├── datasets/             # 原图与标签，本地、不上传
+│   ├── cache/                # 可重建缓存，本地、不上传
+│   └── audits/               # 数据清理明细，本地、不上传
+├── models/
+│   ├── unet/                 # 单帧模型：model/train/evaluate/infer
+│   ├── temporal/             # 当前 ConvGRU 时序模型：同样四个入口
+│   └── losses.py             # 共享 partition loss
+├── results/
+│   ├── unet/                 # 单帧报告与生成代码
+│   │   ├── runs/             # 本地运行记录，不上传
+│   │   └── generated/        # 本地页面、视频、评估，不上传
+│   └── temporal/             # 时序报告与生成代码；相同子目录约定
+├── tests/                    # 本地测试，不上传
+└── docs/                     # 研究思路与目录约定
 ```
 
-**所有脚本都从仓库根目录运行。** `dataPrepare.py` 里的数据集路径是相对路径（`data/datasets/...`）；每个脚本都会自己把仓库根加进 `sys.path`，所以无论用哪种方式启动，`data.pipeline.*` 和 `models.<arch>.*` 都能一致解析。
+从本项目根目录运行命令。`models/` 放模型实现和本地 checkpoint；`results/` 放结果摘要、出图代码及本地产物。Stage1 是实验阶段名称，不再另设 `models/stage1/`；跨模型结果不再塞进日期命名的 pipeline 目录。
 
-**新增一个架构**的做法是：加一个 `models/<arch>/`，里面放它自己的 `model.py`、`train.py`、`test.py` 和 `infer.py`，然后把 [`.env`](.env) 里的 `CHECKPOINT_DIR` 指向 `models/<arch>/checkpoints`。`data/` 下面一行都不用改 —— 数据管线、标签空间和数据集配置是共用的。`analysis/` 遵循同样的约定：今天是 `analysis/unet_analysis/`，以后在旁边加 `analysis/<arch>_analysis/`。
-
-**`analysis/` 目前是架构相关的。** 四个脚本都直接构造 `UNet`，而且 `summarize_model.py` 打印的是手写的 U-Net 拓扑描述。它们放在顶层，是因为「测量延迟、几何和跨域泛化」这件事本身是通用需求 —— 但代码还不通用。
+单元测试、所有 `runs/`、生成页面、权重与缓存由 `.gitignore` 排除。正式评估程序命名为 `evaluate.py`，属于应保留的源码。
 
 ---
 
@@ -102,24 +93,39 @@ pip install -r requirements.txt
 
 ## 数据
 
-`data/datasets/` 下的内容一律不跟踪 —— 四个数据集里有两个的许可不允许在此转载。逐个数据集的下载链接和它们各自必须落到的确切目录结构，见 [data/README_CN.md](data/README_CN.md)。
+`data/datasets/` 下的内容一律不跟踪；请按各自来源和许可获取数据。五个数据集的下载说明与目录结构见 [data/README_CN.md](data/README_CN.md)。下表的旧四域采样量和验证数量为 v10 历史配置，不代表下一轮五域训练的配比。
 
-| 目录 | 来源 | `label_mode` | 训练样本/epoch | Val |
+| 目录 | 来源 | `label_mode` | v10 训练样本/epoch | Val |
 |---|---|---|---|---|
 | `data/datasets/Mus-V/` | 公开，Kaggle/Springer | `full3` | 17 624 (70.9%) | 911 |
 | `data/datasets/mendeley_data/` | 公开，Mendeley Data | `artery` | 3 850 (15.5%) | — |
 | `data/datasets/phantom_taobao/` | 自采，商用仿体 | `vessel` | 2 560 (10.3%) | 13 |
 | `data/datasets/customer_3d_phantom/` | 自采，自制明胶/琼脂仿体 | `vessel` | 840 (3.4%) | 4 |
+| `data/datasets/PMC9883282/` | 公开原始序列 + 本地人工标注 | `full3` | 未参与 v10 | 30 张人工标签 |
 
-两个仿体的验证划分被**合并**成一个 17 图指标 —— 4 图的划分单独打分只是噪声。
+v10 配置中两个仿体的验证划分合并成一个 17 图指标。新的实验须单独记录有效配置和各域结果。
 
-数据就位后，构建增强 NPZ 缓存：
+### PMC9883282：原始序列与人工标注
+
+数据来自[颈内静脉接触力—塌缩研究的补充材料](https://pmc.ncbi.nlm.nih.gov/articles/PMC9883282/)，包含 3 位受试者、6 个 MAT、5215 帧左颈部超声，以及独立记录的 force/time。原始包没有分割标签；本地已完成 **180 张人工 A/V 标注**，按受试者划分为 **train 120 / val 30 / test 30**。
+
+其中 151 张包含动静脉、6 张仅有动脉、23 张为空。这些缺失或空 mask 是有效标注；未标注帧则不能当作背景。PMC 沿用现有 `full3` 混合损失，不增加“血管”输出类别。已删除的 `suggestions/` 只是预标注草稿，训练使用已确认的 `masks/`。
+
+当前人工标签和 PMC 训练缓存均已准备好（train 120 / val 30 / test 30），五域缓存配置指纹检查通过；v11 已训练并完成五域对照评估。图像逐帧时间戳和 pose 未提供，force 与图像的同步尚未确认，因此暂不作为逐帧力监督。
+
+- [原始数据检查、下载与视频预览生成](data/previews/PMC9883282/README_CN.md)
+- [Web 标注与人工 mask 复查](data/collection/README_WEB_CN.md)
+- [五域训练下一步与完整研究路线](docs/ultrasound_world_model.html#next-steps)
+
+数据就位后，构建 NPZ 缓存（训练增强在线执行）：
 
 ```bash
 python data/pipeline/dataPrepare.py --dataset musv
 python data/pipeline/dataPrepare.py --dataset mendeley --no-png
 python data/pipeline/dataPrepare.py --dataset phantom_taobao
 python data/pipeline/dataPrepare.py --dataset customer_3d_phantom
+python data/pipeline/dataPrepare.py --dataset pmc9883282 --validate-only
+python data/pipeline/dataPrepare.py --dataset pmc9883282 --no-png
 python data/pipeline/dataPrepare.py --check-stale     # 哪些缓存已和配置对不上
 ```
 
@@ -129,12 +135,16 @@ python data/pipeline/dataPrepare.py --check-stale     # 哪些缓存已和配置
 
 全部超参、数据集选择和 checkpoint 判据都在 [`.env`](.env) 里 —— 随仓库发布的那组值就是产出已发布 checkpoint 的那组。不想要实验记录就设 `WANDB_ENABLE=false`。
 
+默认 `.env` 和通用模板 [`configs/train.env`](configs/train.env) 仍选择旧四域，**不会自动加入 PMC**。五域实验的数据组合、验证权重及从头训练／微调设置见[主文档执行流程](docs/ultrasound_world_model.html#next-steps)；下方默认训练命令沿用四域选择。
+
+五域新实验采用 `TRAIN_REPEATS=pmc9883282:50`：PMC 的训练抽样占比由 3.7% 提高到 **19.4%**（120 张原图×50＝6000 次/epoch），其余四域抽样次数不变；无需重建缓存。本轮已从头训练并在第 62 轮早停，保留第 32 轮最佳模型。权重统一存放为 `models/unet/checkpoints/unet_v10.pth` 与 `unet_v11.pth`；旧中断实验及两个版本子目录已清理。抽样比例与 `VAL_WEIGHTS` 独立，验证权重本轮保持不变。完整可运行 Bash 见主文档。
+
 ```bash
 # 训练（读 .env；自己挑一张空闲 GPU）
 python models/unet/train.py
 
 # 在留出 test 划分上评估一个 checkpoint
-python models/unet/test.py --ckpt models/unet/checkpoints/unet_v10.pth \
+python models/unet/evaluate.py --ckpt models/unet/checkpoints/unet_v10.pth \
                            --dataset musv mendeley phantom_taobao+customer_3d_phantom
 
 # 延迟 / 吞吐
@@ -145,9 +155,11 @@ python analysis/unet_analysis/predict_geometry.py --ckpt models/unet/checkpoints
                                     --image data/samples/0016.png \
                                     --dataset phantom_taobao
 
-# 重新生成已发表的图
-python results/unet/plot_segmentation_samples.py --ckpt models/unet/checkpoints/unet_v10.pth \
-       --n 2 --seed-phantom 41 --seed-musv 13 --seed-cca 116
+# 生成v11八行展示图（只展示一个phantom，保留历史旧图）
+python results/unet/plot_segmentation_samples.py --ckpt models/unet/checkpoints/unet_v11.pth \
+       --datasets musv mendeley pmc9883282 customer_3d_phantom \
+       --n 2 --showcase-datasets musv mendeley pmc9883282 --showcase-min-dice 0.90 \
+       --out results/unet/figures/segmentation_samples_unet_v11_showcase
 ```
 
 独立推理，不带任何训练侧 import：
@@ -175,11 +187,11 @@ print(g["artery"]["lateral_mm"], g["artery"]["depth_mm"], g["artery"]["radius_mm
 | Mus-V | artery | **0.882** |
 | Mus-V | vein | **0.617** |
 
-Dice 是在部署流水线所做的形态学后处理**之后**测的，因为那才是机器人真正消费的东西；`models/unet/test.py` 会同时打印原始 argmax 的对照表，这样后处理就藏不住模型的真实行为。复现：
+上表为历史 v10 实验数字，不代表当前后处理版本。新的 raw / 旧清理 / 联合修复对照见[后处理更新](results/unet/BASELINE_COMPARISON_CN.md)。使用当前规则重新评估：
 
 ```bash
-python models/unet/test.py --ckpt models/unet/checkpoints/unet_v10.pth \
-       --dataset musv mendeley customer_3d_phantom phantom_taobao --min-area 150
+python models/unet/evaluate.py --ckpt models/unet/checkpoints/unet_v10.pth \
+       --dataset musv mendeley customer_3d_phantom phantom_taobao --min-area 4
 ```
 
 `--min-area 150` 不能省：这个参数**默认是 0**，也就是完全关闭后处理，而上表给的是部署流水线实际产出的后处理结果。不加它静脉会是 0.612 而不是 0.617。
@@ -203,6 +215,8 @@ python analysis/unet_analysis/bench_fps.py --ckpt models/unet/checkpoints/unet_v
 
 ![segmentation samples](results/unet/figures/segmentation_samples.png)
 
+上图为保留的历史结果。本轮仅保留[八行v11展示图](results/unet/figures/segmentation_samples_unet_v11_showcase.png)及其选帧JSON，依次展示Mus-V、Mendeley、PMC和Custom 3D phantom，使用最终联合后处理。Mus-V、Mendeley和PMC为每类Dice均不低于0.90且兼顾画面差异的成功样例，phantom固定seed；展示分数不代表数据集均值，全测试集统计仍包含两个phantom。最终展示PNG及选帧JSON已从Git忽略规则中放行，可随仓库提交，可用上方命令生成；需先准备数据、缓存和权重，已有输出不会覆盖。
+
 三行依次是 Mus-V、Mendeley CCA 和仿体。注意 CCA 那几行：模型在颈动脉旁边勾出了一根静脉（蓝色），而真值**没有**标它。这正是部分标签目标函数按设计工作的表现 —— CCA 的 loss 对静脉是不变的，所以在那里预测静脉不花任何代价，而静脉先验是从 Mus-V 迁移过来的。
 
 全分辨率的已发表图保存在 [`results/unet/figures/segmentation_samples.svg`](results/unet/figures/segmentation_samples.svg)。
@@ -215,7 +229,7 @@ python analysis/unet_analysis/bench_fps.py --ckpt models/unet/checkpoints/unet_v
 
 ### 后处理
 
-部署路径和评估路径共用同一套形态学：开运算（3×3 椭圆核）→ 闭运算（5×5）→ 每类只保留最大连通域 → 丢弃小于 `min_area` 的区域。[`models/unet/infer.py`](models/unet/infer.py) 的 `clean()` 到此为止（`min_area=300`）；[`models/unet/test.py`](models/unet/test.py) 的 `clean_binary()` 在此之上还加了锚点和距离门控（`min_area=150`，`max_dist=40`）。上面的 Dice 数字是后处理**之后**测的，因为那是机器人消费的东西，而 `test.py` 会并排打印原始 argmax 表，这样后处理藏不住模型的行为。
+当前推理和评估共用 `models/unet/postprocess.py`：先在有单一类别锚点的血管区域修复局部动静脉混杂，再做半径2闭运算和填洞，过滤少于4像素的小区域，每类最多保留一个区域；不做开运算。补全不覆盖另一类保留区域，空输入保持为空。`min_area=1` 可保留极小目标。关键对照数值汇总保留；新规则的验证/测试结果见[后处理更新](results/unet/BASELINE_COMPARISON_CN.md)。
 
 ### 无血管帧上的假阳性
 
@@ -266,5 +280,6 @@ https://github.com/user-attachments/assets/f3ac8a1e-8759-4e72-b5cd-6a491dfb8b4b
 - **U-Net 架构** — [milesial/Pytorch-UNet](https://github.com/milesial/Pytorch-UNet)
 - **Common Carotid Artery Ultrasound Images** — [Mendeley Data](https://data.mendeley.com/datasets/d4xt63mgjm/1)
 - **Carotid and Femoral Vessel Ultrasound Dataset (Mus-V)** — [Springer](https://link.springer.com/chapter/10.1007/978-3-031-72083-3_61) · [Kaggle](https://www.kaggle.com/datasets/fa8b3e1386722702d9c80a7d2d10d5d50eef20d14a604078b38d01c66fd9f356)
+- **PMC9883282 颈内静脉接触力—塌缩数据** — [原论文与补充材料](https://pmc.ncbi.nlm.nih.gov/articles/PMC9883282/)
 - **Albumentations** — [albumentations-team/albumentations](https://github.com/albumentations-team/albumentations)
 - **Weights & Biases** — [wandb.ai](https://wandb.ai)

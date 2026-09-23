@@ -1,8 +1,31 @@
 # U-Net — 结果、实验记录与论文素材
 
+> **当前入口：** [v11 重训报告](V11_REFRESH_CN.md) · [浏览报告](generated/v11_refresh/index.html) · [Mus-V 连续视频](generated/musv_review/index.html)。当前默认仍是原 v11。`runs/` 和 `generated/` 全部只保留本地，不上传。时序实验统一见 [temporal](../temporal/README_CN.md)。
+
+
+> 当前结果统一见 [单帧基线对比摘要](BASELINE_COMPARISON_CN.md)：最终指标、后处理流程、局限及复现命令。Git保留该摘要和生成代码；图集、HTML、逐帧CSV/JSON按需写入 `generated/`（Git忽略）。下方原有实验数字属于历史v10，不与新口径混用。
+
 > English: [README.md](README.md)
 
 本文件合并了原先的 `EXPERIMENTS.md`（实验方案与日志）和 `PAPER_SEGMENTATION.md`（论文数据点、失败模式分析与写作稿）。全部内容只针对 [`models/unet/`](../../models/unet/) 这一个架构。
+
+## 训练状态监控
+
+`models/unet/monitor.py` 使用 Python 标准库，每 60 秒读取指定训练进程、GPU 使用情况和 checkpoint 更新；不加载模型、不修改训练。训练进程退出后监控自动结束。可复用于后续版本：
+
+```bash
+python -u models/unet/monitor.py --pid <训练主进程PID> \
+  --checkpoint-dir models/unet/checkpoints/<版本> \
+  --train-log results/unet/runs/<运行名>/train.log
+```
+
+本轮训练及后台监控已结束，历史监控记录：
+
+```bash
+tail -f results/unet/runs/unet_v11_balanced/monitor.log
+```
+
+本次训练的 `tee` 未打开日志文件，历史监控只记录进程、GPU 和 checkpoint。用户终端确认 epoch 62 正常早停；最终对照评估及最佳验证复算已另存报告。checkpoint 文件名中的 epoch 是最佳保存轮次，不代表当前轮次。后续训练请先创建日志目录并确认 `tee` 成功打开文件。监控不会自动重启或终止训练。
 
 **参考模型**：[`models/unet/checkpoints/unet_v10.pth`](../../models/unet/checkpoints/) —— U-Net，3 通道输出（背景 / 静脉 / 动脉），`base_ch=32`，**7.76 M 参数**，dropout2d 0.3，epoch 19，best PRIMARY = 0.8622。下文所有数字都出自这一个 checkpoint。
 
@@ -92,7 +115,7 @@
 复现：
 
 ```bash
-python models/unet/test.py --ckpt models/unet/checkpoints/unet_v10.pth \
+python models/unet/evaluate.py --ckpt models/unet/checkpoints/unet_v10.pth \
        --dataset musv mendeley customer_3d_phantom phantom_taobao --min-area 150
 ```
 
@@ -266,7 +289,7 @@ Mus-V 真值的**客观瑕疵**：
 
 ```bash
 python models/unet/train.py
-python models/unet/test.py --ckpt models/unet/checkpoints/<best>.pth \
+python models/unet/evaluate.py --ckpt models/unet/checkpoints/<best>.pth \
        --dataset phantom_taobao --no-save
 ```
 
@@ -496,17 +519,21 @@ python analysis/unet_analysis/probe_generalization.py \
 
 | 脚本 | 输出 | 说明 |
 |---|---|---|
-| [`plot_segmentation_samples.py`](plot_segmentation_samples.py) | `figures/segmentation_samples.{svg,pdf,png}` | **论文定性主图**。三个域各一行，配色编码「哪根血管」而非「对错」 |
+| [`plot_segmentation_samples.py`](plot_segmentation_samples.py) | `figures/segmentation_samples_<checkpoint>.png` | **五域定性图**。默认各一行，使用最终联合后处理；按模型名另存，禁止覆盖。原图保留。 |
 | [`plot_results.py`](plot_results.py) | `figures/exp_results.{pdf,svg,png}` | Exp-A..E 分组柱状图。**注意：画的是 §3.1 的第一阶段二分类实验**，不是当前三分类模型 |
 | [`figure_style.py`](figure_style.py) | — | 共享 matplotlib 样式，不自己出图。被上面两个 import |
 
 ```bash
 # 论文定性主图
 python results/unet/plot_segmentation_samples.py \
-       --ckpt models/unet/checkpoints/unet_v10.pth \
-       --n 2 --seed-phantom 41 --seed-musv 13 --seed-cca 116
+       --ckpt models/unet/checkpoints/unet_v11.pth \
+       --n 2 --seed 42
 
-# 挑 seed 时加 --preview：只出 PNG、150 dpi，快约 5 倍
+# 默认PNG、200dpi；--preview 为150dpi，--formats png pdf svg 可显式导出其他格式
 ```
 
 `figure_style.py` 的 `FigureConfig` 有三档预设：默认（大字号，按 IEEE 双栏缩放后仍清晰）、`ieee_strict()`（8–10 pt，用于已定稿排版）、`presentation()`（幻灯片 / 海报）。所有图都按 12.0" 宽度作图并按同一因子缩放到论文栏宽，这样每张图的文字印出来物理尺寸一致 —— 不要单独改某张图的宽度。
+
+新图默认命名为 `segmentation_samples_<checkpoint名>.png`，并保存同名前缀的JSON记录测试缓存索引和单帧指标。`--datasets` 可选域，`--n` 控制每域张数，`--seed` 固定选帧，`--out` 指定新的输出前缀。默认包含五个数据集，优先选有可见标注的帧，不按预测好坏挑图。输出已存在时拒绝覆盖；新生成的带版本名图片/JSON默认被Git忽略，最终 `segmentation_samples_unet_v11_showcase.png/.json` 已单独放行，已有 `segmentation_samples.png/.svg` 保留。
+
+可用 `--datasets musv mendeley pmc9883282 customer_3d_phantom --n 2 --showcase-datasets musv mendeley pmc9883282 --showcase-min-dice 0.90 --out results/unet/figures/segmentation_samples_unet_v11_showcase` 在Mus-V、CCA、PMC中选择每类Dice≥0.90且画面差异较大的成功样例，phantom保持固定seed。择优身份写入本说明与JSON；图片排版沿用历史 `segmentation_samples`，不覆盖旧图，不改变全测试集结果。

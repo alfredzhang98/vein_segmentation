@@ -2,6 +2,7 @@ import os
 import sys
 import random
 import hashlib
+import csv
 from pathlib import Path
 
 # 限制线程数，防止共享服务器上 fork/内存分配失败
@@ -84,6 +85,21 @@ MODE_IDS = {
 # every single epoch. See the header of ReadDataset for why that mattered.
 
 DATASET_CONFIGS = {
+    "pmc9883282": {
+        "source_type": "reviewed_csv",
+        "data_dir": Path("data/datasets/PMC9883282"),
+        "meta_file": Path("data/datasets/PMC9883282/meta_PMC9883282_1.csv"),
+        "npz_prefix": "augmented_pmc9883282_1",
+        "aug_times_train": 8,
+        "mask_class_map": {0: CLASS_BG, 255: CLASS_VEIN, 128: CLASS_ARTERY},
+        "label_mode": "full3",
+        "target_size": (576, 544), "color_mode": "gray", "crop": None,
+        "seed": 42, "fit_mode": "letterbox", "aug_scale": (0.8, 1.2),
+        "aug_gamma": (70, 140), "aug_speckle": (0.85, 1.15),
+        "aug_blur": 0.3, "aug_hflip": True, "aug_vflip": False,
+        "aug_rotation_limit": 15, "aug_brightness": (-0.12, 0.12),
+        "aug_contrast": (-0.15, 0.15), "aug_noise_prob": 0.35,
+    },
     "phantom_taobao": {
         "source_type":     "csv",
         "data_dir":        Path("data/datasets/phantom_taobao"),
@@ -346,7 +362,7 @@ def isotropic_zoom(img: np.ndarray, mask: np.ndarray, s: float) -> tuple:
 # What actually lives in the NPZ now is the ORIGINAL frame: loaded, cropped, remapped
 # into the shared id space, and fit() to target_size. Nothing else. Augmentation moved
 # to ReadDataset.__getitem__ and happens at training time, so an augmentation setting
-# no longer invalidates the cached arrays — only these five keys do. (The old list
+# no longer invalidates the cached arrays — preprocessing keys and source labels do. (The old list
 # hashed every aug_* key, because those pixels really were baked in; it also hashed a
 # `_FINGERPRINT_DEFAULTS` dict that had `aug_scale` written twice and four keys
 # indented into it by accident, which silently did nothing.)
@@ -364,6 +380,21 @@ def aug_fingerprint(dataset_name: str) -> str:
         if isinstance(v, dict):
             v = tuple(sorted(v.items()))
         items.append(f"{k}={tuple(v) if isinstance(v, list) else v!r}")
+    # A quality exclusion or a brush edit must invalidate the old training arrays.
+    meta = cfg.get("meta_file")
+    if meta and Path(meta).exists():
+        meta = Path(meta)
+        items.append("metadata=" + hashlib.sha256(meta.read_bytes()).hexdigest())
+        with meta.open(newline="") as f:
+            for row in csv.DictReader(f):
+                value = row.get("mask_path", "")
+                if not value:
+                    continue
+                path = Path(value)
+                if not path.is_absolute() and not path.exists():
+                    path = meta.parent / path
+                items.append(str(path) + "=" + (hashlib.sha256(path.read_bytes()).hexdigest()
+                             if path.exists() else "missing"))
     return hashlib.sha1("|".join(items).encode()).hexdigest()[:12]
 
 
@@ -441,12 +472,12 @@ def write_fingerprint(name: str) -> None:
 
 def check_stale(names=None) -> list:
     """
-    Which datasets' NPZ no longer match their current augmentation config?
+    Which datasets' NPZ no longer match preprocessing or source annotations?
 
     An NPZ with no fingerprint is treated as STALE, not as OK. Guessing "probably
-    fine" is exactly the quiet failure this is meant to prevent: an augmentation
-    setting changes, nothing complains, and training silently keeps using arrays
-    baked before it. If you have verified by hand that an un-fingerprinted NPZ still
+    fine" is exactly the quiet failure this is meant to prevent: an annotation or
+    preprocessing setting changes, and training silently keeps using old arrays.
+    If you have verified by hand that an un-fingerprinted NPZ still
     matches its config, say so explicitly with `--stamp <dataset>`.
 
     Report goes to stderr; the bare names go to stdout for run_train.sh to consume.
@@ -463,7 +494,7 @@ def check_stale(names=None) -> list:
                   f"若确认没变，用 --stamp {name})", file=sys.stderr)
             stale.append(name)
         elif stamp.read_text().strip() != want:
-            print(f"  {name:22s} STALE  (配置已改: {stamp.read_text().strip()} -> {want})",
+            print(f"  {name:22s} STALE  (预处理配置或源标注已改: {stamp.read_text().strip()} -> {want})",
                   file=sys.stderr)
             stale.append(name)
         else:
@@ -563,6 +594,9 @@ class DataPipeline(DataInfo):
     # ------------------------------------------------------------------
 
     def _remap_mask(self, mask: np.ndarray) -> np.ndarray:
+        unknown = set(np.unique(mask).tolist()) - set(self.mask_class_map)
+        if unknown:
+            raise ValueError(f"[{self.dataset_name}] Unmapped mask pixels: {sorted(unknown)}")
         result = np.zeros_like(mask, dtype=np.uint8)
         for k, v in self.mask_class_map.items():
             result[mask == k] = v
@@ -585,6 +619,8 @@ class DataPipeline(DataInfo):
         mask = cv2.imread(str(mask_path), cv2.IMREAD_GRAYSCALE)
         if mask is None:
             raise ValueError(f"Failed to read mask: {mask_path}")
+        if mask.shape != image.shape:
+            raise ValueError(f"Image/mask shape mismatch: {image_path}, {mask_path}")
         mask = self._remap_mask(mask)
 
         crop = self.cfg["crop"]
@@ -667,6 +703,52 @@ class DataPipeline(DataInfo):
             out[split] = rows
             print(f"  {split:5s}: {len(seqs):3d} sequences  {len(rows):5d} frames")
         return out
+
+    def _load_reviewed_rows(self) -> dict:
+        """Subject-disjoint queue; predictions never count as reviewed ground truth."""
+        df = pd.read_csv(self.meta_file, keep_default_na=False, dtype=str)
+        required = {"subject_id", "sequence_id", "frame_index", "split", "mask_status",
+                    "mask_path", "relative_path", "filename", "label_mode"}
+        if not required <= set(df.columns) or df.empty:
+            raise ValueError("Prepare the PMC annotation queue first with prepare_pmc.py")
+        if set(df.label_mode) != {self.label_mode}:
+            raise ValueError(f"Queue label_mode must be {self.label_mode}; choose the matching dataset config")
+        if set(df.split) != {"train", "val", "test"}:
+            raise ValueError("Queue must contain train, val and test splits")
+        for key in ("subject_id", "sequence_id"):
+            if (df.groupby(key).split.nunique() > 1).any():
+                raise ValueError(f"Leakage: {key} crosses splits")
+        if df.duplicated(["sequence_id", "frame_index"]).any():
+            raise ValueError("Duplicate frames in annotation queue")
+        pending = ~df.mask_status.str.lower().isin(["true", "test", "pass"])
+        if pending.any():
+            raise ValueError(f"{int(pending.sum())} frames still need human review in label.py; no NPZ written")
+        reviewed = df[df.mask_status.str.lower().isin(["true", "test"])].copy()
+        if "frame_valid" in reviewed.columns:
+            reviewed = reviewed[reviewed.frame_valid.str.lower() != "false"].copy()
+        if ((reviewed.mask_status.str.lower() == "test") & (reviewed.split != "test")).any():
+            raise ValueError("Save as Test is only valid for the predefined test subject")
+        out = {}
+        for split in ("train", "val", "test"):
+            rows = reviewed[reviewed.split == split].to_dict("records")
+            if not rows:
+                raise ValueError(f"No reviewed masks for {split}")
+            for row in rows:
+                mask = Path(row["mask_path"])
+                if not mask.is_file() or mask.resolve().parent != (self.cfg["data_dir"] / "masks").resolve():
+                    raise ValueError(f"Only human-reviewed masks/ files are accepted: {mask}")
+            out[split] = rows
+        return out
+
+    def validate_reviewed_annotations(self) -> dict:
+        """Validate a reviewed_csv source and its masks without building NPZ caches."""
+        if self.cfg["source_type"] != "reviewed_csv":
+            raise ValueError("Annotation review validation requires a reviewed_csv dataset")
+        splits = self._load_reviewed_rows()
+        for rows in splits.values():
+            for row in rows:
+                self._load_and_crop(*self._resolve_paths(row))
+        return {split: len(rows) for split, rows in splits.items()}
 
     def _resolve_paths(self, row: dict) -> tuple:
         if sys.platform.startswith('linux'):
@@ -762,7 +844,10 @@ class DataPipeline(DataInfo):
               f"|  允许的 mask id: {sorted(self.valid_ids)}  "
               f"(0=bg 1=vein 2=artery 3=vessel-untyped)")
 
-        if source_type == "musv":
+        if source_type == "reviewed_csv":
+            split_rows = self._load_reviewed_rows()
+            train_rows, val_rows, test_rows = (split_rows[s] for s in ("train", "val", "test"))
+        elif source_type == "musv":
             # Split is predefined by the dataset and honoured at sequence level.
             split_rows = self._load_rows_from_musv()
             train_rows = split_rows["train"]
@@ -830,12 +915,9 @@ class ReadDataset(Dataset):
     A split of one dataset, read from its NPZ of uint8 ORIGINALS.
 
     TRAIN: augmentation happens HERE, fresh on every __getitem__. Each original is
-    drawn `aug_times_train` times per epoch (that is what __len__ multiplies by), and
-    every draw gets an independent random transform. The epoch size and the mix
-    between datasets are byte-for-byte what they were when the augmentation was baked
-    into the NPZ — musv 2203x8, mendeley 770x5, phantom 44x40, customer_3d 41x40 —
-    so nothing about the training balance changed. What changed is that epoch 2 no
-    longer shows the model the exact same pixels as epoch 1.
+    drawn `aug_times_train` times per epoch unless `train_repeat` overrides it for
+    this dataset instance. Every draw gets a fresh random transform. Changing the
+    repeat count changes the training mixture, not the NPZ contents or label mode.
 
     Why that was the single biggest defect: the vein overfits. Train loss fell
     monotonically 0.575 -> 0.074 across 27 epochs while val vein Dice peaked at epoch
@@ -851,11 +933,18 @@ class ReadDataset(Dataset):
     def __init__(self, dataset_type: str = 'train',
                  batch_size: int = 8,
                  dataset_name: str = "phantom_taobao",
-                 augment: bool = None):
+                 augment: bool = None,
+                 train_repeat: int = None):
         super().__init__()
         self.dataset_type = dataset_type
         self.batch_size   = batch_size
         self.dataset_name = dataset_name
+
+        if train_repeat is not None:
+            if type(train_repeat) is not int or train_repeat < 1:
+                raise ValueError("train_repeat must be a positive integer")
+            if dataset_type != 'train' or augment is False:
+                raise ValueError("train_repeat is only valid for augmented training data")
 
         if dataset_name not in DATASET_CONFIGS:
             raise ValueError(f"Unknown dataset '{dataset_name}'. "
@@ -881,7 +970,9 @@ class ReadDataset(Dataset):
         self.valid_ids  = MODE_IDS[self.label_mode]
 
         self.augment = (dataset_type == 'train') if augment is None else augment
-        self.repeat  = cfg["aug_times_train"] if self.augment else 1
+        self.repeat = (
+            train_repeat if train_repeat is not None else cfg["aug_times_train"]
+        ) if self.augment else 1
 
         self.images, self.masks, self.image_type = read_npz_file(self.data_path)
 
@@ -962,6 +1053,8 @@ if __name__ == "__main__":
                         help="Which dataset to process")
     parser.add_argument("--no-png", action="store_true",
                         help="Skip saving PNG files (faster)")
+    parser.add_argument("--validate-only", action="store_true",
+                        help="Validate a reviewed_csv annotation queue and masks without writing NPZ")
     parser.add_argument("--test-loader", action="store_true",
                         help="Test the DataLoader after processing")
     parser.add_argument("--check-stale", action="store_true",
@@ -990,6 +1083,13 @@ if __name__ == "__main__":
         sys.exit(0)
 
     pipeline = DataPipeline(args.dataset)
+    if args.validate_only:
+        try:
+            counts = pipeline.validate_reviewed_annotations()
+        except (ValueError, FileNotFoundError) as e:
+            parser.exit(2, f"Annotations not ready: {e}\n")
+        print(f"Validated {args.dataset}: {counts}")
+        sys.exit(0)
     pipeline.run(save_png=not args.no_png)
     write_fingerprint(args.dataset)
 

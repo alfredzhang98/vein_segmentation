@@ -1,7 +1,7 @@
 """
 Test script — 在 test 集上评估模型，保存预测可视化图
 用法:
-    python models/unet/test.py --ckpt models/unet/checkpoints/unet_v10.pth
+    python models/unet/evaluate.py --ckpt models/unet/checkpoints/unet_v10.pth
 """
 import os
 for _k in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS'):
@@ -25,13 +25,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from PIL import Image
-from scipy.ndimage import binary_fill_holes
 from tqdm import tqdm
 
 from data.pipeline.dataPrepare import (ReadDataset, DATASET_CONFIGS,
                                        CLASS_BG, CLASS_VEIN, CLASS_ARTERY, CLASS_VESSEL)
 from models.unet.train import validate, build_val_loaders, CONFIG
 from models.unet.model import UNet
+from models.unet.postprocess import clean_binary, clean_labels, complete_region
 
 
 def get_device():
@@ -107,152 +107,8 @@ def overlay(gray_hw: np.ndarray, label_hw: np.ndarray, alpha: float = 0.55) -> n
     return np.where(fg, (1 - alpha) * rgb + alpha * col, rgb).astype(np.uint8)
 
 
-# ----------------------------------------------------------------------------------
-#  Post-processing — the SAME cleanup the deployed pipeline applies
-# ----------------------------------------------------------------------------------
-#
-# infer.clean() already does open -> close -> keep-largest -> min_area before
-# any geometry is measured, so a Dice reported WITHOUT it is not the number the robot
-# actually runs on. This makes the two comparable. Both numbers are always printed:
-# post-processing must never be able to hide what the model really did.
-#
-# The two knobs are NOT equally safe, measured on the Mus-V ground truth:
-#
-#   keep-largest   Artery: safe. 99.4% of frames have exactly one artery component,
-#                  and the single 2-component frame's extra blob is 1 px of annotation
-#                  noise.
-#                  Vein: NOT free. 2.5% (val) / 1.3% (test) of frames have two real
-#                  vein components, and the second one has a median area of 1071 px
-#                  (max 4230). Keeping only the largest DESTROYS those. It is still a
-#                  net win if the model produces more spurious islands than that, but
-#                  it is a trade, not a freebie.
-#
-#   min_area       The smallest TRUE vein in Mus-V test is 232 px (1st percentile 456).
-#                  So min_area=200 is essentially free; the deployment default of 300
-#                  kills real veins in under 1% of frames. Above ~450 you start eating
-#                  real vessels.
-
-_K3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-_K5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-
-
-def clean_binary(binary: np.ndarray, min_area: int = 150,
-                 max_dist: float = 40.0, keep_largest: bool = True) -> np.ndarray:
-    """
-    ANCHOR + DISTANCE GATE.  open -> close -> drop noise -> anchor -> keep what is near
-    the anchor, delete what is far.
-
-    WHY keep_largest DEFAULTS TO TRUE
-    ---------------------------------
-    Each class is ONE vessel. That is not an imposed constraint, it is what the data
-    says: the artery is a single connected component in 99.4% of Mus-V ground-truth
-    frames, the vein in 90-95%, the phantom tube in 100%. The distance gate, by
-    contrast, is designed to KEEP fragments near the anchor, and duly leaves a class
-    split across two blobs on 3.6% (vein) / 1.5% (artery) of test frames.
-
-    That matters downstream, not just visually. measure() takes moments of the mask:
-    the centroid of two separated blobs lands in the gap BETWEEN them — a location where
-    no vessel exists — and that centroid is a needle target.
-
-    The Dice cost of insisting on one component is nil: vein 0.6187 -> 0.6170, artery
-    0.8812 -> 0.8823, i.e. -0.002 and +0.001, both inside run-to-run noise. So the
-    distance gate's marginal Dice edge does not pay for handing the robot an occasional
-    centroid in empty tissue.
-
-    Pass keep_largest=False to restore the gate — worth doing only if a frame is ever
-    expected to hold two disjoint parts of the same class.
-
-    The physical fact this rests on, measured on the ground truth: a real vessel is ONE
-    connected blob. Mus-V's vein is a single component in 90-95% of frames, its artery
-    in 99.4%, and the phantom's tube in 100%. So a fragment sitting far from the main
-    vessel is almost certainly spurious, while a fragment right next to it is almost
-    certainly the same vessel that the model happened to cut in two.
-
-      1. open(3) + close(5)                     — kill speckle, bridge 1-2 px gaps
-      2. fill interior holes                    — a lumen is solid; see below
-      3. drop components below min_area         — noise, wherever it is
-      4. the LARGEST survivor is the anchor     — safe: the truth has one vessel
-      5. keep survivors within max_dist of it   — same vessel, split by the model
-      6. delete everything else                 — a big blob far away is a false positive
-
-    ON FILLING HOLES
-    ----------------
-    close(5) only bridges gaps up to about its kernel — anything larger stayed as a
-    hole punched through the middle of a predicted vessel, which is visibly wrong: a
-    vessel lumen is anechoic, so there is no structure inside one to preserve.
-
-    Measured across all four datasets and all three splits — 7166 ground-truth vessel
-    regions — 113 (1.6%) do contain an interior hole, so "the ground truth never has
-    holes" is FALSE and an earlier version of this comment claiming so was wrong (it
-    had only checked the test splits). What is true is sharper and still sufficient:
-
-      * Every hole is tiny. The largest in the entire project is 68 px, median 11.
-        These are annotation artefacts — a few pixels missed inside a lumen — not
-        anatomy. For scale, the smallest true vein is 232 px.
-      * They are almost entirely a TRAINING-annotation phenomenon (Mus-V's vein
-        accounts for 106 of the 113, at 5.3% of its training regions), and this
-        function never runs during training.
-      * Of the 2134 held-out (val + test) regions this function is ever scored
-        against, exactly ONE has a hole, of 14 px.
-
-    So the fill cannot meaningfully destroy a real structure, and it is still the
-    closest thing to a free step in this pipeline — but "free" rests on the holes
-    being 68 px of annotation noise, not on them being absent.
-
-    Step 4/5 is the part that actually earns its keep, and it is the part that holds up:
-    ranked on BOTH val and test, gate-40px > gate-20px > keep-largest-only > keep-
-    everything. Keeping everything above min_area is the WORST option on both — the far
-    false positives it lets through cost more than the fragments it saves.
-
-    ON min_area, AND A WARNING ABOUT TUNING IT
-    ------------------------------------------
-    Do not optimise this against Dice. Tuned on val, the best min_area is 450; tuned on
-    test, it is 100 — opposite ends of the range, because val has twice as many
-    empty-vein frames (7.5% vs 3.8%) and smaller veins (median 3769 vs 5167 px), so
-    aggressive filtering rescues empty frames there and destroys real veins here. That
-    is noise-fitting, not a signal.
-
-    So set it from PHYSICS instead: the smallest true vein in Mus-V is 232 px. A
-    threshold below that cannot delete a real vessel. 150 is the default for that reason
-    and no other.
-
-    Honest scale: tuned on val and reported on test, the whole of this buys +0.010 Dice
-    on the artery and +0.001 on the vein. The vein's train/val gap is 0.20. This is a
-    rounding error on the real problem — it is worth doing, and it is not a fix.
-
-    keep_largest: ignore max_dist and keep only the anchor. Kept for the deployment path
-    that needs exactly one object to take moments of.
-    """
-    b = (binary > 0).astype(np.uint8)
-    if not b.any():
-        return b.astype(bool)
-
-    b = cv2.morphologyEx(b, cv2.MORPH_OPEN,  _K3)
-    b = cv2.morphologyEx(b, cv2.MORPH_CLOSE, _K5)
-    b = binary_fill_holes(b).astype(np.uint8)      # a lumen is solid — see docstring
-
-    n, lab, stats, _ = cv2.connectedComponentsWithStats(b, connectivity=8)
-    if n <= 1:
-        return np.zeros_like(b, dtype=bool)
-    areas = stats[1:, cv2.CC_STAT_AREA]
-
-    surv = [i + 1 for i, a in enumerate(areas) if a >= min_area]
-    if not surv:
-        return np.zeros_like(b, dtype=bool)
-
-    anchor = surv[int(np.argmax([areas[i - 1] for i in surv]))]
-    if keep_largest:
-        return lab == anchor
-
-    keep = {anchor}
-    if max_dist > 0 and len(surv) > 1:
-        # Euclidean distance from every pixel to the anchor; a fragment's distance is
-        # the distance of its closest pixel.
-        dt = cv2.distanceTransform((lab != anchor).astype(np.uint8), cv2.DIST_L2, 5)
-        for i in surv:
-            if i != anchor and dt[lab == i].min() <= max_dist:
-                keep.add(i)
-    return np.isin(lab, list(keep))
+# Cleanup is shared with deployment. Defaults retain thin compressed veins and
+# allow either class to be absent; joint repair uses closing and enclosed-hole filling.
 
 
 def _dice(pred: np.ndarray, gt: np.ndarray) -> float:
@@ -315,11 +171,16 @@ def eval_postproc(model, loader, device, cfg, min_area: int, max_dist: float,
             #     deployed infer.measure() does.
             kw = dict(min_area=min_area, max_dist=max_dist, keep_largest=keep_largest)
             if mode == "vessel":
-                cln_f = clean_binary(raw_f, **kw)
+                cln_f = (complete_region(raw_f, min_area=min_area) if keep_largest
+                         else clean_binary(raw_f, **kw))
                 cln_v = cln_a = None
             else:
-                cln_v = clean_binary(raw_v, **kw)
-                cln_a = clean_binary(raw_a, **kw)
+                if keep_largest:
+                    repaired = clean_labels(p, min_area=min_area)
+                    cln_v, cln_a = repaired == CLASS_VEIN, repaired == CLASS_ARTERY
+                else:
+                    cln_v = clean_binary(raw_v, **kw)
+                    cln_a = clean_binary(raw_a, **kw)
                 cln_f = cln_v | cln_a
 
             n_raw, _ = cv2.connectedComponents(raw_f.astype(np.uint8), connectivity=8)
@@ -330,6 +191,13 @@ def eval_postproc(model, loader, device, cfg, min_area: int, max_dist: float,
                 add("dice_vein",   _dice(raw_v, g == CLASS_VEIN),   _dice(cln_v, g == CLASS_VEIN))
                 add("dice_artery", _dice(raw_a, g == CLASS_ARTERY), _dice(cln_a, g == CLASS_ARTERY))
                 add("dice_vessel", _dice(raw_f, g > 0),             _dice(cln_f, g > 0))
+                for name, raw, cln, truth in [("vein", raw_v, cln_v, g == CLASS_VEIN),
+                                               ("artery", raw_a, cln_a, g == CLASS_ARTERY)]:
+                    if not truth.any():
+                        add(f"absent_{name}_fp_rate", float(raw.any()), float(cln.any()))
+                        add(f"absent_{name}_fp_pixels", float(raw.sum()), float(cln.sum()))
+                if not (g > 0).any():
+                    add("empty_frame_fp_rate", float(raw_f.any()), float(cln_f.any()))
             elif mode == "vessel":
                 add("dice_vessel", _dice(raw_f, g == CLASS_VESSEL), _dice(cln_f, g == CLASS_VESSEL))
             elif mode == "artery":
@@ -454,31 +322,31 @@ def save_predictions(model, loader, device, cfg, output_dir: Path, num_samples: 
             # it as ONE region — the same thing the deployed binary path does.
             fg = (pred_np == CLASS_VEIN) | (pred_np == CLASS_ARTERY)
             if do_clean:
-                fg = clean_binary(fg, **kw)
+                fg = (complete_region(fg, min_area=min_area) if keep_largest
+                      else clean_binary(fg, **kw))
             pred_np = np.where(fg, CLASS_VESSEL, CLASS_BG).astype(np.uint8)
             legend  = "green = vessel (type not asked for on a phantom)"
         elif do_clean:
-            v = clean_binary(pred_np == CLASS_VEIN,   **kw)
-            a = clean_binary(pred_np == CLASS_ARTERY, **kw)
-            # Reassemble by ASSIGNMENT, not by `v * 1 + a * 2`. The two cleaned masks can
-            # overlap — clean_binary's morphological CLOSE dilates before it erodes — and
-            # an arithmetic sum turns 1 + 2 into 3, inventing a "vessel, type unknown"
-            # label out of thin air. It showed up as green pixels in Mus-V overlays, a
-            # class that dataset cannot possibly contain. Artery wins the overlap: it is
-            # the far better-segmented of the two (Dice 0.88 vs 0.66).
-            pred_np = np.zeros_like(pred_np)
-            pred_np[v] = CLASS_VEIN
-            pred_np[a] = CLASS_ARTERY
-            legend  = "red = artery, blue = vein"
+            if keep_largest:
+                repaired = clean_labels(pred_np, min_area=min_area)
+                v, a = repaired == CLASS_VEIN, repaired == CLASS_ARTERY
+            else:
+                v = clean_binary(pred_np == CLASS_VEIN, **kw)
+                a = clean_binary(pred_np == CLASS_ARTERY, **kw)
+            # Display-only overlap is green; training/metrics remain A/V masks.
+            pred_np = v.astype(np.uint8) + 2 * a.astype(np.uint8)
+            legend = "red = artery, blue = vein, green = overlap"
         else:
             legend = "red = artery, blue = vein"
 
+        vessel_np = np.where(pred_np > 0, CLASS_VESSEL, CLASS_BG).astype(np.uint8)
         panels = [
             (img_np,                       "Image"),
             (overlay(img_np, mask_np),     "Ground Truth"),
             (overlay(img_np, pred_np),     "Prediction"),
+            (overlay(img_np, vessel_np),   "Vessel union"),
         ]
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        fig, axes = plt.subplots(1, 4, figsize=(20, 5))
         for ax, (arr, title) in zip(axes, panels):
             ax.imshow(arr, cmap="gray" if arr.ndim == 2 else None)
             ax.set_title(title); ax.axis("off")
@@ -495,6 +363,7 @@ def save_predictions(model, loader, device, cfg, output_dir: Path, num_samples: 
         Image.fromarray(img_np).save(out / f"sample_{idx:02d}_image.png")
         Image.fromarray(colorize(mask_np)).save(out / f"sample_{idx:02d}_mask.png")
         Image.fromarray(colorize(pred_np)).save(out / f"sample_{idx:02d}_pred.png")
+        Image.fromarray(colorize(vessel_np)).save(out / f"sample_{idx:02d}_vessel.png")
 
     print(f"Done → {out}")
 
@@ -517,20 +386,12 @@ def main():
                         help="在 artery 模式的数据集(mendeley)上探测模型预测了多少静脉。"
                              "那里的静脉真实存在但没标注，训练和验证都完全不碰它，"
                              "所以这是一个纯粹的泛化性检验。只在 test 时用")
-    parser.add_argument("--min-area", type=int, default=0,
-                        help="删掉面积小于这个值的连通域。0=关闭后处理。"
-                             "别拿 Dice 去调它：val 上最优是 450，test 上最优是 100，"
-                             "两头顶天，纯粹在拟合噪声。按物理定：Mus-V 里最小的真静脉是"
-                             " 232 px，所以 150 保证删不掉真血管。推荐 150")
+    parser.add_argument("--min-area", type=int, default=4,
+                        help="评估网格上的连通域最小面积；默认4；可设1保留极小目标。增大会误删受压血管。")
     parser.add_argument("--max-dist", type=float, default=40.0,
-                        help="锚点(最大连通域)之外的碎片，离锚点 <= 这个距离(px)就保留"
-                             "（同一根血管被模型切开了），更远的直接删（假阳性）。"
-                             "在 val 和 test 上排名一致: 40px > 20px > 只留最大 > 全留")
+                        help="仅 --allow-fragments 生效：保留距最大区域不超过此像素距离的碎片")
     parser.add_argument("--allow-fragments", action="store_true",
-                        help="关掉 keep_largest，改用 --max-dist 的距离门控，允许一类保留"
-                             "多个连通域。默认是**每类只留一个闭合区域**——因为真值里动脉"
-                             "99.4%%、静脉 90-95%% 就是单连通域，而两个分离块算出的质心会落在"
-                             "两者之间的空隙里（那是个不存在的进针位置）")
+                        help="实验选项：允许同一类别多个邻近区域；默认每类最多一个，允许为空")
     args = parser.parse_args()
     args.keep_largest = not args.allow_fragments
 
@@ -565,7 +426,7 @@ def main():
             rule.append("每类只留最大连通域" if args.keep_largest
                         else f"保留离锚点 <={args.max_dist:g}px 的碎片，更远的删掉")
             print(f"\n[后处理 — {ds_name}]  {' + '.join(rule)}  "
-                  f"(开/闭运算与 infer.clean() 完全一致)")
+                  f"(默认共用联合类别修复 + 闭运算/填洞；allow-fragments使用旧距离筛选)")
             print(f"  {'':14s}{'原始':>10s}{'后处理':>10s}{'Δ':>9s}")
             for k in sorted(pp):
                 raw, cln = pp[k]
@@ -610,10 +471,10 @@ def main():
     if do_pp:
         rule = [f"min_area={args.min_area}"]
         rule.append("keep_largest" if args.keep_largest else f"max_dist={args.max_dist:g}")
-        table(f"最终结果 — 后处理后 ({', '.join(rule)})  ← 这才是机器人真正吃到的数",
+        table(f"最终结果 — 后处理后 ({', '.join(rule)})",
               lambda d, k: postproc[d][k][1])
-        print("\n注：后处理和 infer.clean() 用的是同一套形态学，所以这一张表"
-              "\n    才是部署时的真实水平。两张表都打出来，是为了让后处理无法掩盖模型的真实行为。")
+        print("\n注：后处理和 infer.clean() 用的是同一套连通域筛选，所以这一张表"
+              "\n    但评估使用模型输入网格，部署使用原图网格；像素阈值不应跨网格直接比较。")
 
 
 if __name__ == "__main__":

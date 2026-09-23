@@ -29,6 +29,13 @@ Thumbs.db
 data/datasets/*
 !data/datasets/.gitkeep
 
+# Preview outputs are reproducible; only scripts and READMEs are versioned.
+data/previews/**/*.mp4
+data/previews/**/*.webm
+data/previews/**/index.html
+data/previews/**/manifest.json
+data/previews/**/.preview-*/
+
 # ---------------------------------------------------------------------------
 # Model weights. Each architecture keeps its own models/<arch>/checkpoints/;
 # the directory is tracked so a fresh clone has somewhere to write, the
@@ -42,6 +49,9 @@ models/*/checkpoints/*
 # READMEs, the plotting scripts and the published figures — IS tracked, which
 # is the point of the directory.
 # ---------------------------------------------------------------------------
+# Local evaluation artifacts: images, HTML, per-frame data, detailed JSON.
+# Keep concise result statements in Markdown outside generated/.
+generated/
 results/*/predictions/
 results/*/probes/
 
@@ -55,3 +65,26 @@ wandb/
 *.dcm
 *.zip
 *.mat
+
+# Versioned qualitative previews are regenerated locally; retain existing historical figures.
+results/unet/figures/segmentation_samples_*.png
+results/unet/figures/segmentation_samples_*.svg
+results/unet/figures/segmentation_samples_*.pdf
+results/unet/figures/segmentation_samples_*.json
+
+# Retain the final v11 showcase and its reproducible sample provenance.
+!results/unet/figures/segmentation_samples_unet_v11_showcase.png
+!results/unet/figures/segmentation_samples_unet_v11_showcase.json
+
+# Frozen spatial features and temporal run artifacts are reproducible local caches.
+data/cache/
+results/temporal/studies/
+
+# Local tests and runtime outputs: keep on disk, never publish with source.
+tests/
+test/
+test.py
+test_*.py
+*_test.py
+runs/
+data/audits/

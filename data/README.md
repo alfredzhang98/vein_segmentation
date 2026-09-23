@@ -1,159 +1,28 @@
-# Data
+# Data preparation and label conventions
 
-Everything to do with data lives under this directory: how frames are acquired, how they
-become training tensors, where the datasets go, and the vendor SDK the acquisition
-scripts need.
+**Start with the [dataset download guide](VIDEO_DATASETS_CN.md)** for public links, copyable commands, expected paths, storage requirements, and annotation setup. Mus-V is available from the project-provided [Google Drive file](https://drive.google.com/file/d/17dGwgo5UJsWUUGEENN9Zw9Tv3kurlya7/view?usp=drive_link).
 
-> 中文版：[README_CN.md](README_CN.md)
+Raw datasets, local human masks, checkpoints and generated artifacts are not included in a Git clone. In particular, the official PMC archive contains raw sequences, not this project's reviewed A/V masks. Exact reproduction requires the corresponding annotation snapshot and split metadata separately. Sample counts in historical reports refer to those experiment snapshots; current validity is recorded in each dataset's CSV.
 
-## Layout
+[中文版](README_CN.md) · [Web annotation](collection/README_WEB_CN.md)
 
-| Directory | What it holds | Tracked by git |
-|---|---|---|
-| [`collection/`](collection/) | Acquisition and annotation — Clarius Cast, A325 capture card, the brush labeller | yes |
-| [`pipeline/`](pipeline/) | Preprocessing, augmentation, the NPZ cache, the `Dataset` class | yes |
-| [`datasets/`](datasets/) | The actual data. Download it yourself — see §1 | **no** |
-| [`clarius_sdk/`](clarius_sdk/) | Clarius Cast native API. Needed **only** for acquisition, never for training | yes |
-| [`samples/`](samples/) | A handful of example frames, so the demo commands in the README run out of the box | yes |
+## 1. Dataset paths and training keys
 
-Run every command from the **repository root**. Paths in `pipeline/dataPrepare.py` are
-relative (`data/datasets/...`).
+Run commands from the repository root. Directory names differ from CLI/configuration keys:
 
----
-
-## 1. Datasets
-
-Nothing under `datasets/` is tracked. Two of the four sets are under licences that do not
-permit redistribution here, and the other two are large. Download each one and place it
-at the exact path below.
-
-Directory names matter: they are the keys in `DATASET_CONFIGS`
-([`pipeline/dataPrepare.py`](pipeline/dataPrepare.py)) and the values accepted by
-`DATASET` / `VAL_DATASET` in [`.env`](../.env).
-
-| Directory | Source | `label_mode` | Mask ids | What is annotated |
+| Directory under `data/datasets/` | Training key | `label_mode` | Training mask IDs | Supervision |
 |---|---|---|---|---|
-| `Mus-V/` | Kaggle (public) | `full3` | 0 / 1 / 2 | background, vein, artery — all three |
-| `mendeley_data/` | Mendeley Data (public) | `artery` | 0 / 2 | common carotid artery only |
-| `phantom_taobao/` | self-collected | `vessel` | 0 / 3 | a gel tube, type undetermined |
-| `customer_3d_phantom/` | self-collected | `vessel` | 0 / 3 | a gel tube, type undetermined |
+| `Mus-V/` | `musv` | `full3` | 0 / 1 / 2 | Background, vein, artery |
+| `mendeley_data/` | `mendeley` | `artery` | 0 / 2 | Artery; other pixels do not distinguish vein from background |
+| `PMC9883282/` | `pmc9883282` | `full3` | 0 / 1 / 2 | Reviewed A/V masks; source PNG 0 / 255 / 128 is remapped |
+| `phantom_taobao/` | `phantom_taobao` | `vessel` | 0 / 3 | Untyped phantom vessel |
+| `customer_3d_phantom/` | `customer_3d_phantom` | `vessel` | 0 / 3 | Untyped phantom vessel |
 
-Mask id `3` means "a vessel, type not labelled" and never appears as a model output
-channel — the model emits 3 channels (background / vein / artery). The mapping from
-whatever a dataset stores on disk to these shared ids is `mask_class_map`, declared per
-dataset in `DATASET_CONFIGS`.
+The model has three output channels. Label ID 3 means an untyped vessel and is supervised through the sum of vein and artery probabilities, not a fourth output. See [`pipeline/dataPrepare.py`](pipeline/dataPrepare.py) for the actual mappings.
 
-### 1.1 `phantom_taobao/` and `customer_3d_phantom/` — self-collected
+ThrombUS, Regional-US and TUS-REC2024 are optional video sources, not registered training keys. Their original diagnostic, nerve or tracking annotations are not A/V segmentation masks. They still need format adapters and human A/V review.
 
-Download from
-[Google Drive](https://drive.google.com/drive/folders/1LPwezlAUmxWnUo791RM3OPAhGQHq5r0v?usp=sharing)
-and extract **directly into `datasets/`** — do not create a nested `datasets/data/...`.
-
-> **Rename on extraction.** The archives use the older names. `phantom_1` is the
-> commercial phantom and must become **`phantom_taobao`**; `phantom_2` is the custom
-> phantom and must become **`customer_3d_phantom`**. The code will not find them under
-> the old names.
-
-```
-data/datasets/
-├── phantom_taobao/                      # commercial phantom, Clarius Cast capture
-│   ├── images/                          #   raw grayscale frames
-│   ├── masks/                           #   annotated binary masks
-│   ├── images_aug/  masks_aug/          #   optional PNG previews from dataPrepare.py
-│   └── meta_phantom_taobao_1.csv        #   per-image metadata (micropixel, depth, gain)
-│
-└── customer_3d_phantom/                 # custom gelatin + agar + saline phantom, A325 capture
-    ├── images/  masks/
-    ├── images_aug/  masks_aug/
-    └── meta_customer_3d_phantom_1.csv
-```
-
-```bash
-python data/pipeline/dataPrepare.py --dataset phantom_taobao
-python data/pipeline/dataPrepare.py --dataset customer_3d_phantom
-```
-
-- `phantom_taobao` — commercial phantom, [Taobao listing](https://item.taobao.com/item.htm?id=762322402710)
-- `customer_3d_phantom` — custom-made (gelatin + agar + saline), 3D-printed vessel core
-
-### 1.2 `mendeley_data/` — Common Carotid Artery Ultrasound Images
-
-**Not included.** Download from
-[Mendeley Data](https://data.mendeley.com/datasets/d4xt63mgjm/1) (CC BY 4.0) and extract
-so the paths are exactly:
-
-```
-data/datasets/mendeley_data/
-└── Common Carotid Artery Ultrasound Images/
-    ├── US images/              # 1100 frames (PNG, 709x749x3)
-    └── Expert mask images/     # 1100 expert masks, matching filenames
-```
-
-```bash
-python data/pipeline/dataPrepare.py --dataset mendeley --no-png
-```
-
-**Specs** — 1100 images + 1100 expert masks, 709×749×3; Mindray UMT-500Plus with an
-L13-3s linear probe; 11 subjects; CC BY 4.0.
-
-**Why `label_mode = artery`.** The expert masks label the common carotid artery and
-nothing else. The internal jugular vein is frequently in frame but left unlabelled,
-sitting inside the "background" region. Supervising those pixels as background would
-teach the model that veins look like background. The objective therefore constrains the
-artery marginal `p₂` only, and is invariant to how the rest of the probability splits
-between background and vein — so an unlabelled jugular vein predicted here costs exactly
-nothing.
-
-> Where the loss is documented: the **mathematics** is in the [top-level README](../README.md);
-> **which partition each dataset induces** is the `label_mode` column above; the
-> **implementation** is in [`models/unet/README.md`](../models/unet/README.md#the-loss--partial_label_loss).
-
-### 1.3 `Mus-V/` — Carotid and Femoral Vessel Ultrasound Dataset
-
-**Not included.** Download from
-[Kaggle](https://www.kaggle.com/datasets/fa8b3e1386722702d9c80a7d2d10d5d50eef20d14a604078b38d01c66fd9f356)
-(CC BY-NC 4.0, **non-commercial only**) and extract so the paths are:
-
-```
-data/datasets/Mus-V/
-└── Multimodal Ultrasound Vascular Image Segmentation/
-    └── ...                     # as distributed
-```
-
-```bash
-python data/pipeline/dataPrepare.py --dataset musv
-```
-
-**Specs** — 3114 frames (2203 train + 911 validation) from 105 probe sweeps, 11
-volunteers; Angell Pioneer H20 scanner; CC BY-NC 4.0.
-
-**Class identity.** Masks are already `{0, 1, 2}` label maps, so `mask_class_map` is the
-identity. That class 1 is the **vein** and class 2 the **artery** was first inferred from
-area statistics — class 1 collapses to zero area in 272 frames and has 3.6× the area
-variance of class 2, i.e. it is the compressible one — and is independently confirmed by
-Mendeley: the channel trained as class 2 from Mus-V predicts the Mendeley expert *artery*
-masks at Dice 0.956. Were the two swapped that number would be near zero.
-
-This is the only dataset that annotates vein and artery separately, and therefore the
-only source of the vein/artery prior that the phantom and CCA sets inherit.
-
-### 1.4 `PMC9883282/` — IJV force-collapse recordings (optional, **unlabelled**)
-
-Not used for training. Supplementary data from a Scientific Reports study of internal
-jugular vein collapse under probe force: 6 MATLAB v7.3 files, each holding
-`ultrasound_images (N, 800, 600) uint8`, `force_data` and `time_data`, for 3 of the
-study's 27 subjects.
-
-**It contains no masks of any kind.** It cannot enter the training objective — a dataset
-has to determine at least one group of the partition to supervise anything, and this one
-determines none. It is kept only as a reference for the vein-compression failure mode
-discussed in [`results/unet/README.md`](../results/unet/README.md), and
-would need cropping (the frames are full scanner screenshots with the UI overlay) plus
-resampling (force is ~50 Hz against 29 Hz video) before any use.
-
-```bash
-curl -O https://pmc-oa-opendata.s3.amazonaws.com/PMC9883282.1/41598_2022_22867_MOESM1_ESM.zip
-```
+Acquisition and annotation code lives in `collection/`, download/preprocessing code in `pipeline/`, and local datasets in the Git-ignored `datasets/`. Quality exclusions apply to both the source frame and its mask. Rebuild caches after annotation edits; do not treat unlabelled frames as empty ground truth.
 
 ---
 
@@ -195,12 +64,25 @@ random augmentation — a different one again next epoch. So `aug_times_train` s
 many *fresh* samples per epoch each original produces, not how many fixed copies sit on
 disk.
 
+The training entry point accepts `TRAIN_REPEATS=dataset:count,...` to override these
+defaults per dataset instance. Length then becomes `n_originals × override_count`.
+This does not modify global dataset configuration, cached arrays, labels or validation/
+test data. Rebalancing requires no cache rebuild and creates no new human annotations.
+
 | Dataset | `aug_times_train` | Why |
 |---|---|---|
 | `phantom_taobao` | 40 | counterweight, or the phantoms get diluted to ~7% of the mixed training set |
 | `customer_3d_phantom` | 40 | same |
 | `musv` | 8 | raised from 3 — the vein class was badly overfitting (train 0.855 / val 0.609) |
 | `mendeley` | 5 | already 1100 frames |
+| `pmc9883282` | 8 by default; overridden to 50 for this run | 120 training originals yield 6,000 rather than 960 draws; augmentation strength unchanged |
+
+The original v11 run used this historical mix (not the current reviewed queue): **30,874 draws/epoch**: Mus-V 17,624 (57.1%),
+Mendeley 3,850 (12.5%), commercial phantom 2,560 (8.3%), custom phantom 840 (2.7%),
+and PMC 6,000 (19.4%). The phantoms have 64 and 21 training originals respectively.
+PMC has 120 training originals, all from subject20; repeated augmentation adds neither
+subjects nor independent observations. Validation and test retain 30 annotations each
+from the two held-out subjects.
 
 ### 2.3 The augmentation pipeline
 
@@ -248,7 +130,7 @@ python data/pipeline/dataPrepare.py --dataset <name>    # rebuild
 
 | Flag | Effect |
 |---|---|
-| `--dataset <name>` | which dataset to build: `phantom_taobao` / `customer_3d_phantom` / `mendeley` / `musv` |
+| `--dataset <name>` | which dataset to build: `phantom_taobao` / `customer_3d_phantom` / `mendeley` / `musv` / `pmc9883282` |
 | `--no-png` | skip writing PNG previews (the NPZ is still built) — much faster on the large sets |
 | `--test-loader` | after building, instantiate the DataLoader and print batch shapes |
 | `--check-stale` | report which caches no longer match their config |

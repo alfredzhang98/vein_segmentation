@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>超声标注</title><link rel="stylesheet" href="/style.css"><script defer src="/app.js"></script></head>
+<body>
+<header><div><h1>超声标注</h1><span id="dataset">连接中…</span></div><span id="progress"></span></header>
+<main>
+<aside>
+  <label>标注队列<select id="filter"><option value="valid" selected>有效帧（逐张复核）</option><option value="pending">待标注</option><option value="reviewed">已确认</option><option value="pass">已跳过</option><option value="excluded">已排除（可恢复）</option><option value="all">全部（含已排除）</option></select></label>
+  <select id="frames" size="16" aria-label="选择图像"></select>
+  <div class="pair"><button id="prev">上一张</button><button id="next">下一张</button></div>
+  <p id="legend" class="muted">蓝色：静脉<br>红色：动脉<br>预标注仅为草稿，请逐帧核对。</p>
+</aside>
+<section class="workspace">
+  <div class="toolbar"><div id="brushes"></div><button id="erase">橡皮擦 E</button>
+    <label>笔径 <input id="size" type="range" min="2" max="100" value="20"><output id="sizeValue">20</output> px</label>
+    <button id="undo">撤销 Ctrl+Z</button><button id="clear">清空</button>
+  </div>
+  <div class="toolbar secondary"><label><input type="checkbox" id="overlay" checked> 显示标注（Tab）</label>
+    <label>透明度 <input id="alpha" type="range" min="10" max="80" value="40"></label>
+    <label>缩放 <select id="zoom"><option value="fit">适应窗口</option><option value="1">100%</option><option value="1.5">150%</option><option value="2">200%</option><option value="3">300%</option></select></label>
+  </div>
+  <div id="viewport"><canvas id="canvas" aria-label="超声图像标注画布"></canvas><div id="empty">正在载入…</div></div>
+  <div id="frameInfo"></div>
+  <div id="qualityInfo" role="status"></div>
+  <p id="cleanupInfo" class="muted" hidden>保存时自动补全小缺口与孔洞，动、静脉各保留一个主要连通区域，清除其余孤立区域；保留细线，不自动互换类别。保存后可返回检查。</p>
+  <footer><button id="skip">跳过此帧</button><button id="save" class="primary">确认标注并保存 →</button><span id="dirty"></span></footer>
+  <div class="toolbar quality-actions">
+    <label>无效原因 <select id="excludeReason"><option value="manual_no_contact">探头未接触 / 无有效组织回声</option><option value="manual_non_ultrasound">非超声画面</option><option value="manual_unusable_image">图像损坏或采集失败</option></select></label>
+    <button id="exclude" class="danger">删除此帧（排除训练）</button>
+    <button id="restore" hidden>恢复此帧到待确认</button>
+    <button id="undoExclude" hidden>撤销刚才的排除</button>
+  </div>
+  <p class="muted">删除仅从训练中排除，原图与已保存标注保留，可在「已排除」恢复。若仍有有效组织回声，只是血管压扁或消失，请保留并按实际情况标注。</p>
+  <div id="message" role="status" aria-live="polite"></div>
+  <p class="muted">左键拖动画笔 · 画布内滚轮向上放大笔刷、向下缩小（2–100 px） · 1/2 切换类别 · E 擦除 · Ctrl+Z 撤销 · Tab 查看原图 · Ctrl+S 确认保存<br>保存后写入服务器；切换或离开页面时会提醒未保存修改。按住 Shift 滚轮可横向查看放大的图像。</p>
+</section>
+</main>
+</body></html>

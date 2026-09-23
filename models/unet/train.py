@@ -1,10 +1,13 @@
 """
 U-Net Training Script
-- 所有参数通过 .env 文件配置
+- 参数通过 .env 或 --config 指定的实验配置文件读取
 - 自动检测空闲 GPU，多 GPU 并行训练（DataParallel）
 - 支持 binary / multi-class，AMP，梯度裁剪，ReduceLROnPlateau / Cosine，wandb
 """
 import os
+import argparse
+import json
+import random
 
 # 限制线程数，防止共享服务器上 fork/内存分配失败
 for _k in ('OPENBLAS_NUM_THREADS', 'OMP_NUM_THREADS', 'MKL_NUM_THREADS'):
@@ -20,7 +23,51 @@ from pathlib import Path
 from typing import Dict, Any, Tuple, List
 
 from dotenv import load_dotenv
-load_dotenv()   # 读取 .env 文件，必须在所有 os.environ.get 之前
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+
+
+def load_training_environment(config_path=None):
+    """Use one dotenv file; explicit shell variables take precedence over it.
+
+    An experiment replaces the root .env rather than inheriting mutable settings
+    from it. Relative config paths are resolved from the caller's working directory.
+    """
+    path = Path(config_path).resolve() if config_path else PROJECT_ROOT / ".env"
+    if config_path and not path.is_file():
+        raise FileNotFoundError(f"Training config not found: {path}")
+    load_dotenv(path, override=False)
+    return path
+
+
+def apply_training_overrides(overrides):
+    """Apply explicit KEY=VALUE arguments after file/shell configuration."""
+    parsed = {}
+    for item in overrides:
+        key, sep, value = item.partition("=")
+        if not sep or not re.fullmatch(r"[A-Z][A-Z0-9_]*", key):
+            raise ValueError(f"Expected KEY=VALUE, got {item!r}")
+        parsed[key] = value
+    os.environ.update(parsed)
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Train U-Net with the partial-label mixed loss")
+    parser.add_argument("--config", type=Path, help="Experiment dotenv file; default: repository .env")
+    parser.add_argument("--set", nargs="+", action="extend", default=[], metavar="KEY=VALUE",
+                        help="Override config values for this run; may be repeated")
+    parser.add_argument("--show-config", action="store_true",
+                        help="Print effective settings and exit without loading data or selecting a GPU")
+    args = parser.parse_args()
+    try:
+        load_training_environment(args.config)
+        apply_training_overrides(args.set)
+    except (FileNotFoundError, ValueError) as e:
+        parser.error(str(e))
+    # Dataset/checkpoint paths retain the documented repository-relative meaning.
+    os.chdir(PROJECT_ROOT)
+else:
+    load_training_environment()
 
 import torch
 import torch.nn as nn
@@ -33,7 +80,7 @@ import wandb
 # Repo root on sys.path, so `common` and `models` import the same way however this
 # file is launched (python models/unet/train.py, or -m models.unet.train).
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
-from data.pipeline.dataPrepare import (ReadDataset, MODE_IDS,
+from data.pipeline.dataPrepare import (ReadDataset, MODE_IDS, check_stale,
                                        CLASS_BG, CLASS_VEIN, CLASS_ARTERY, CLASS_VESSEL)
 from models.unet.model import UNet
 
@@ -68,7 +115,33 @@ def _parse_weights(spec: str) -> Dict[str, float]:
     return out
 
 
+def _parse_train_repeats(spec: str) -> Dict[str, int]:
+    """Per-source online draws per original; independent of validation weights."""
+    out = {}
+    for item in spec.split(','):
+        if not item.strip():
+            continue
+        name, sep, value = item.strip().partition(':')
+        name, value = name.strip(), value.strip()
+        if not sep or not name or not re.fullmatch(r'[0-9]+', value) or int(value) < 1:
+            raise ValueError(f"TRAIN_REPEATS expects dataset:positive_integer, got {item!r}")
+        if name in out:
+            raise ValueError(f"Duplicate dataset in TRAIN_REPEATS: {name}")
+        out[name] = int(value)
+    return out
+
+
+def validate_train_repeats(cfg):
+    spec = 'phantom_taobao+mendeley' if cfg['dataset'] == 'mixed' else cfg['dataset']
+    names = {name.strip() for name in spec.split('+') if name.strip()}
+    unknown = set(cfg.get('train_repeats', {})) - names
+    if unknown:
+        raise ValueError(f"TRAIN_REPEATS keys must be selected in DATASET: {sorted(unknown)}")
+
+
 CONFIG: Dict[str, Any] = {
+    "seed": _env('SEED', 42, int),
+    "history_path": _env('HISTORY_PATH', ''),
     # epochs & early stop
     "epochs":               _env('EPOCHS',               200,    int),
     "early_stop_patience":  _env('EARLY_STOP_PATIENCE',  15,     int),
@@ -80,6 +153,7 @@ CONFIG: Dict[str, Any] = {
     "plateau_patience":     _env('PLATEAU_PATIENCE',      5,      int),
     "cosine_Tmax":          _env('COSINE_TMAX',           50,     int),
     "amp":                  _env('AMP',                   True,   bool),
+    "amp_dtype":            _env('AMP_DTYPE',             'float16'),
     # model
     "batch_size_per_gpu":   _env('BATCH_SIZE_PER_GPU',   20,     int),
     "n_channels":           _env('N_CHANNELS',            1,      int),
@@ -103,6 +177,7 @@ CONFIG: Dict[str, Any] = {
     "gradient_clip":        _env('GRADIENT_CLIP',         1.0,    float),
     # dataset & transfer learning
     "dataset":              _env('DATASET',               'phantom_taobao'),
+    "train_repeats":        _parse_train_repeats(_env('TRAIN_REPEATS', '')),
     "val_datasets":         [s.strip() for s in _env('VAL_DATASET', 'phantom_taobao').split(',') if s.strip()],
     # 决定 checkpoint / early-stop 的准则：
     #   'weighted'  = 各验证集按 VAL_WEIGHTS 加权求和（推荐）
@@ -116,6 +191,7 @@ CONFIG: Dict[str, Any] = {
     # checkpoint
     "checkpoint_dir":       _env('CHECKPOINT_DIR',        'models/unet/checkpoints'),
     "resume_path":          _env('RESUME_PATH',           '') or None,
+    "init_path":            _env('INIT_PATH',             '') or None,
     "reset_best_dice":      _env('RESET_BEST_DICE',       False,  bool),
     "run_name":             _env('RUN_NAME',              'run'),
     # wandb
@@ -350,107 +426,8 @@ def dice_loss_from_logits(logits: torch.Tensor, target: torch.Tensor,
 # Everything is computed from log_softmax + logsumexp, so log(p1+p2) is exact and
 # numerically stable; no epsilon fudging, and it is safe under autocast.
 
-LABEL_MODES = ("full3", "vessel", "artery")
-
-
-def _soft_dice(prob: torch.Tensor, target: torch.Tensor, eps: float = 1e-6) -> torch.Tensor:
-    """Soft Dice on a single foreground probability map. prob/target: (N, H, W)."""
-    inter    = 2 * (prob * target).sum(dim=(-1, -2))
-    sets_sum = prob.sum(dim=(-1, -2)) + target.sum(dim=(-1, -2))
-    sets_sum = torch.where(sets_sum == 0, inter, sets_sum)
-    return ((inter + eps) / (sets_sum + eps)).mean()
-
-
-def _soft_tversky(prob: torch.Tensor, target: torch.Tensor,
-                  alpha: float, beta: float, eps: float = 1e-6) -> torch.Tensor:
-    """
-    Tversky index. alpha weights false positives, beta weights false negatives;
-    alpha = beta = 0.5 reduces exactly to Dice.
-
-    Why this exists: measured on Mus-V val, 37% of true VEIN pixels were being called
-    background, while only 1.3% were called artery — the model was not confusing the
-    two vessels, it was missing the vein outright. A vein is thin, compressed against
-    the tissue and low-contrast, so under a loss that prices a false positive and a
-    false negative identically (Dice does), the safe play is to predict background.
-    Setting beta > alpha makes missing a vein pixel more expensive than inventing one,
-    which is the asymmetry the problem actually has.
-    """
-    tp = (prob * target).sum(dim=(-1, -2))
-    fp = (prob * (1 - target)).sum(dim=(-1, -2))
-    fn = ((1 - prob) * target).sum(dim=(-1, -2))
-    return ((tp + eps) / (tp + alpha * fp + beta * fn + eps)).mean()
-
-
-def _region_loss(prob: torch.Tensor, target: torch.Tensor,
-                 cfg: Dict[str, Any]) -> torch.Tensor:
-    """1 - Dice, or 1 - Tversky when TVERSKY_BETA is set."""
-    beta = cfg.get("tversky_beta")
-    if not beta:
-        return 1 - _soft_dice(prob, target)
-    return 1 - _soft_tversky(prob, target, cfg.get("tversky_alpha", 1.0 - beta), beta)
-
-
-def partial_label_loss(logits: torch.Tensor, target: torch.Tensor,
-                       modes: List[str],
-                       class_weights: torch.Tensor = None,
-                       cfg: Dict[str, Any] = None) -> torch.Tensor:
-    """
-    logits (B, 3, H, W) — raw. target (B, 1, H, W) long, ids in that sample's own
-    label space. modes: per-sample label_mode, len B.
-    """
-    cfg    = cfg or {}
-    logits = logits.float()
-    logp   = F.log_softmax(logits, dim=1)          # (B, 3, H, W)
-    tgt    = target.squeeze(1).long()              # (B, H, W)
-
-    losses = []
-    for mode in LABEL_MODES:
-        sel = torch.tensor([m == mode for m in modes], device=logits.device)
-        if not sel.any():
-            continue
-        lp, y = logp[sel], tgt[sel]
-
-        # The ids ARE the meaning now (dataPrepare: 0 bg / 1 vein / 2 artery /
-        # 3 vessel-untyped). A sample routed to the wrong marginal would otherwise
-        # supervise the wrong channel and merely look like a bad epoch.
-        assert set(torch.unique(y).tolist()) <= MODE_IDS[mode], (
-            f"label_mode='{mode}' 收到了 id {sorted(torch.unique(y).tolist())}，"
-            f"只允许 {sorted(MODE_IDS[mode])}"
-        )
-
-        if mode == "full3":
-            ce = F.nll_loss(lp, y, weight=class_weights)
-            # Per-class region loss rather than dice_coeff's 3-class average: that
-            # average is dominated by the background channel (96% of pixels, always
-            # near-perfect), which drowns out the vein term we are actually trying to
-            # move. Averaging the two vessel classes only puts the pressure where the
-            # error is.
-            p = lp.exp()
-            region = torch.stack([
-                _region_loss(p[:, c], (y == c).float(), cfg)
-                for c in (CLASS_VEIN, CLASS_ARTERY)
-            ]).mean()
-
-        elif mode == "vessel":
-            # marginal over {bg} vs {vein, artery} — the split between them stays free
-            log_fg = torch.logsumexp(lp[:, [CLASS_VEIN, CLASS_ARTERY]], dim=1)  # log(p1+p2)
-            log_bg = lp[:, CLASS_BG]                        # log(p0) == log(1 - p_fg)
-            yf     = (y == CLASS_VESSEL).float()
-            ce     = -(yf * log_fg + (1 - yf) * log_bg).mean()
-            region = _region_loss(log_fg.exp(), yf, cfg)
-
-        elif mode == "artery":
-            # marginal over {bg, vein} vs {artery}; the bg/vein split stays free, so an
-            # unlabelled jugular vein predicted here costs exactly nothing
-            log_fg = lp[:, CLASS_ARTERY]                                        # log(p2)
-            log_bg = torch.logsumexp(lp[:, [CLASS_BG, CLASS_VEIN]], dim=1)      # log(p0+p1)
-            yf     = (y == CLASS_ARTERY).float()
-            ce     = -(yf * log_fg + (1 - yf) * log_bg).mean()
-            region = _region_loss(log_fg.exp(), yf, cfg)
-
-        losses.append((ce + region) * sel.sum())
-
-    return torch.stack(losses).sum() / len(modes)
+from models.losses import (LABEL_MODES, _soft_dice, _soft_tversky, _region_loss,
+                           partial_label_loss)
 
 
 @torch.no_grad()
@@ -560,7 +537,7 @@ def validate(model: nn.Module, loader: DataLoader,
         if binary:
             masks = (masks > 0).float()
 
-        with torch.autocast(autocast_dtype, enabled=cfg["amp"]):
+        with torch.autocast(autocast_dtype, enabled=cfg["amp"], dtype=getattr(torch,cfg.get('amp_dtype','float16'))):
             logits = model(imgs)
             if binary:
                 loss = (criterion(logits.squeeze(1), masks.squeeze(1))
@@ -652,7 +629,7 @@ def train(model: nn.Module, train_loader: DataLoader,
 
     binary    = cfg["num_classes"] == 1
     criterion = nn.BCEWithLogitsLoss() if binary else None
-    scaler    = torch.amp.GradScaler('cuda', enabled=cfg["amp"] and device.type == 'cuda')
+    scaler    = torch.amp.GradScaler('cuda', enabled=cfg["amp"] and device.type == 'cuda' and cfg.get('amp_dtype','float16')=='float16')
 
     # Optional CE re-weighting for the 3-class model. Background is ~96% of pixels,
     # vein ~1.9%, artery ~2.2%; the Dice term already counteracts this, so leave
@@ -666,6 +643,14 @@ def train(model: nn.Module, train_loader: DataLoader,
     best_dice      = -math.inf
     no_improve     = 0
     prev_ckpt_path = None
+
+    # Initialisation is deliberately separate from resume: new LR, scheduler and epoch.
+    if cfg.get("init_path"):
+        if cfg.get("resume_path"):
+            raise ValueError("INIT_PATH and RESUME_PATH are mutually exclusive")
+        initial = torch.load(cfg["init_path"], map_location=device, weights_only=False)
+        _unwrap(model).load_state_dict(initial["model"])
+        logging.info(f"Initialised model only from {cfg['init_path']}; fresh optimizer/scheduler")
 
     # Resume
     if cfg["resume_path"] and Path(cfg["resume_path"]).is_file():
@@ -741,7 +726,7 @@ def train(model: nn.Module, train_loader: DataLoader,
 
             optimizer.zero_grad(set_to_none=True)
 
-            with torch.autocast(autocast_dtype, enabled=cfg["amp"]):
+            with torch.autocast(autocast_dtype, enabled=cfg["amp"], dtype=getattr(torch,cfg.get('amp_dtype','float16'))):
                 logits = model(imgs)
                 if binary:
                     loss = (criterion(logits.squeeze(1), masks.squeeze(1))
@@ -749,10 +734,12 @@ def train(model: nn.Module, train_loader: DataLoader,
                 else:
                     loss = partial_label_loss(logits, masks, list(modes), class_weights, cfg)
 
+            if not torch.isfinite(loss):
+                raise FloatingPointError('Nonfinite loss; refusing to continue an invalid training run')
             scaler.scale(loss).backward()
             if cfg["gradient_clip"]:
                 scaler.unscale_(optimizer)
-                nn.utils.clip_grad_norm_(_unwrap(model).parameters(), cfg["gradient_clip"])
+                nn.utils.clip_grad_norm_(_unwrap(model).parameters(), cfg["gradient_clip"], error_if_nonfinite=cfg.get('amp_dtype')=='bfloat16')
             scaler.step(optimizer)
             scaler.update()
 
@@ -827,6 +814,13 @@ def train(model: nn.Module, train_loader: DataLoader,
             wtag = f"[w={cfg['val_weights'][vname]:g}]" if vname in cfg["val_weights"] else ""
             parts.append(f"{vname}{wtag}: {detail}")
         logging.info(f"Epoch {epoch}/{cfg['epochs']}: " + "  |  ".join(parts) + gap_str)
+        if cfg.get("history_path"):
+            history_path = Path(cfg["history_path"])
+            history_path.parent.mkdir(parents=True, exist_ok=True)
+            with history_path.open("a") as history_file:
+                history_file.write(json.dumps(dict(epoch=epoch, loss=epoch_loss,
+                    primary=val_dice, validation=val_results,
+                    learning_rate=optimizer.param_groups[0]['lr'])) + "\n")
 
         if run:
             log_dict = {
@@ -955,11 +949,31 @@ def remove_ckpt(prev_path: Path):
 # ----------------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    try:
+        validate_train_repeats(CONFIG)
+    except ValueError as exc:
+        parser.error(str(exc))
+    if CONFIG["init_path"] and CONFIG["resume_path"]:
+        parser.error("INIT_PATH and RESUME_PATH are mutually exclusive")
+    if args.show_config:
+        mode = "resume" if CONFIG["resume_path"] else "finetune" if CONFIG["init_path"] else "from_scratch"
+        print(json.dumps({"training_mode": mode, "config": CONFIG,
+                          "runtime": {"num_workers": _env("NUM_WORKERS", 8, int),
+                                      "max_gpus": _env("MAX_GPUS", 1, int)}},
+                         indent=2, ensure_ascii=False))
+        sys.exit(0)
     logging.basicConfig(level=logging.INFO,
                         format='%(asctime)s - %(levelname)s - %(message)s')
 
+    # A web review/exclusion must be reflected in rebuilt arrays before training.
+    stale = check_stale([name.strip() for name in CONFIG['dataset'].split('+') if name.strip()])
+    if stale:
+        parser.error('数据缓存已过期，请先重新运行 data/pipeline/dataPrepare.py：' + ', '.join(stale))
+
     # 1. 自动检测空闲 GPU
     DEVICE, gpu_ids = select_devices()
+    random.seed(CONFIG['seed']); np.random.seed(CONFIG['seed']); torch.manual_seed(CONFIG['seed'])
+    if torch.cuda.is_available(): torch.cuda.manual_seed_all(CONFIG['seed'])
 
     # 打印设备详情
     print("=" * 60)
@@ -1004,7 +1018,9 @@ if __name__ == "__main__":
 
     if len(train_names) > 1:
         from torch.utils.data import ConcatDataset
-        parts = [ReadDataset('train', batch_size=1, dataset_name=n) for n in train_names]
+        parts = [ReadDataset('train', batch_size=1, dataset_name=n,
+                             train_repeat=CONFIG['train_repeats'].get(n)) for n in train_names]
+        CONFIG['effective_train_repeats'] = {n: p.repeat for n, p in zip(train_names, parts)}
         total = sum(len(p) for p in parts)
         for n, p in zip(train_names, parts):
             logging.info(f"  + {n:22s} {len(p):6d} 样本/epoch  ({len(p)/total*100:4.1f}%)  "
@@ -1015,7 +1031,9 @@ if __name__ == "__main__":
                                   persistent_workers=n_workers > 0,
                                   prefetch_factor=4 if n_workers > 0 else None)
     else:
-        train_ds     = ReadDataset('train', batch_size=total_batch, dataset_name=train_names[0])
+        train_ds     = ReadDataset('train', batch_size=total_batch, dataset_name=train_names[0],
+                                   train_repeat=CONFIG['train_repeats'].get(train_names[0]))
+        CONFIG['effective_train_repeats'] = {train_names[0]: train_ds.repeat}
         train_loader = train_ds.get_dataloader(shuffle=True, num_workers=n_workers)
 
     # val — 逗号分隔多个验证集；一项里用 '+' 连接则把它们**池化成一个指标**。

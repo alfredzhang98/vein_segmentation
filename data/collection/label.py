@@ -27,7 +27,7 @@ from datetime import datetime
 
 
 from PySide6.QtCore import Qt, QPointF, QRectF, QTimer
-from PySide6.QtGui import QPixmap, QPainter, QPen, QBrush, QColor, QFont, QImage
+from PySide6.QtGui import QPixmap, QPainter, QPen, QBrush, QColor, QFont, QImage, QShortcut, QKeySequence
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QPushButton, QLabel, QMessageBox, QGraphicsView,
@@ -63,6 +63,11 @@ BRUSH_TYPES = {
         "color": QColor(255, 0, 0, 50),
         "pixel_value": 64,
         "display_name": "tbd2"
+    },
+    "erase": {
+        "color": QColor(0, 0, 0, 0),
+        "pixel_value": 0,
+        "display_name": "Erase"
     }
 }
 # ────────────────────────────────────────────────────────────────────────────────
@@ -71,8 +76,9 @@ BRUSH_TYPES = {
 class PaintView(QGraphicsView):
     """Canvas with circular brush drawing backed by a numpy mask array."""
 
-    def __init__(self):
+    def __init__(self, brush_types=None):
         super().__init__()
+        self.brush_types = brush_types or BRUSH_TYPES
         self.setScene(QGraphicsScene(self))
 
         self.pixmap_item = QGraphicsPixmapItem()
@@ -84,15 +90,18 @@ class PaintView(QGraphicsView):
 
         # Numpy mask: same size as image, stores pixel_value per brush type
         self._mask_np = None
+        self._undo = []
 
         self.brush_size = DEFAULT_BRUSH_SIZE
-        self.current_brush_type = list(BRUSH_TYPES.keys())[0]
+        self.current_brush_type = list(self.brush_types.keys())[0]
         self.is_painting = False
         self.last_pt = QPointF()
 
         self.setMouseTracking(True)
 
     def load_image(self, path: Path):
+        self._undo.clear()
+        self.paint_item.setVisible(True)
         pix = QPixmap(str(path))
         self.pixmap_item.setPixmap(pix)
         self.setSceneRect(QRectF(pix.rect()))
@@ -107,15 +116,49 @@ class PaintView(QGraphicsView):
         self.brush_size = s
 
     def set_brush_type(self, brush_type: str):
-        if brush_type in BRUSH_TYPES:
+        if brush_type in self.brush_types:
             self.current_brush_type = brush_type
 
     def get_current_brush_color(self):
-        return BRUSH_TYPES[self.current_brush_type]["color"]
+        return self.brush_types[self.current_brush_type]["color"]
+
+    def load_mask(self, path: Path):
+        img = QImage(str(path)).convertToFormat(QImage.Format.Format_Grayscale8)
+        if img.isNull() or (img.height(), img.width()) != self._mask_np.shape:
+            raise ValueError(f"Mask is unreadable or has wrong dimensions: {path}")
+        arr = np.frombuffer(img.constBits(), dtype=np.uint8).reshape(img.height(), img.bytesPerLine())
+        self._mask_np = arr[:, :img.width()].copy()
+        allowed = {b["pixel_value"] for b in self.brush_types.values()} | {0}
+        if set(np.unique(self._mask_np)) - allowed:
+            raise ValueError(f"Unknown mask values: {path}")
+        self._redraw_mask()
+
+    def _redraw_mask(self):
+        rgba = np.zeros((*self._mask_np.shape, 4), dtype=np.uint8)
+        for brush in self.brush_types.values():
+            rgba[self._mask_np == brush["pixel_value"]] = brush["color"].getRgb()
+        h, w = self._mask_np.shape
+        overlay = QImage(rgba.data, w, h, w * 4, QImage.Format.Format_RGBA8888).copy()
+        self.paint_pixmap = QPixmap.fromImage(overlay)
+        self.paint_item.setPixmap(self.paint_pixmap)
+
+    def remember_stroke(self):
+        if self._mask_np is not None:
+            self._undo.append(self._mask_np.copy())
+            self._undo = self._undo[-20:]
+
+    def undo(self):
+        if self._undo:
+            self._mask_np = self._undo.pop()
+            self._redraw_mask()
+
+    def toggle_overlay(self):
+        self.paint_item.setVisible(not self.paint_item.isVisible())
 
     # ── Mouse events ──────────────────────────────────────────────
     def mousePressEvent(self, ev):
         if ev.button() == Qt.LeftButton and self.paint_pixmap:
+            self.remember_stroke()
             self.is_painting = True
             self.last_pt = self.mapToScene(ev.position().toPoint())
             self._stamp(self.last_pt)
@@ -157,7 +200,7 @@ class PaintView(QGraphicsView):
         if self._mask_np is None:
             return
         h, w = self._mask_np.shape
-        pv = BRUSH_TYPES[self.current_brush_type]["pixel_value"]
+        pv = self.brush_types[self.current_brush_type]["pixel_value"]
 
         # Bounding box (clipped)
         y0 = max(0, int(cy - r))
@@ -207,6 +250,7 @@ class PaintView(QGraphicsView):
             self._stamp_mask(cx, cy, r)
 
     def clear_painting(self):
+        self.remember_stroke()
         if self.paint_pixmap:
             self.paint_pixmap.fill(Qt.GlobalColor.transparent)
             self.paint_item.setPixmap(self.paint_pixmap)
@@ -225,10 +269,19 @@ class PaintView(QGraphicsView):
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, test_name="phantom_taobao", test_id="1"):
+    def __init__(self, test_name="phantom_taobao", test_id="1", review=False):
         super().__init__()
         self.dataInfo = DataInfo(test_name=test_name, test_id=test_id)
         self.dataInfo.ensure_dirs()
+        self.is_pmc = test_name == "PMC9883282"
+        self.brush_types = BRUSH_TYPES.copy()
+        if self.is_pmc:
+            self.brush_types = {
+                "vein": BRUSH_TYPES["vein"],
+                "artery": {"color": QColor(255, 0, 0, 70), "pixel_value": 128,
+                           "display_name": "Artery (128)"},
+                "erase": BRUSH_TYPES["erase"],
+            }
         self.setWindowTitle(f"Annotation Tool: {self.dataInfo.test_name} (Test {self.dataInfo.test_id})")
 
         self._setup_font()
@@ -264,7 +317,8 @@ class MainWindow(QMainWindow):
 
         # Build pending list (ND status only)
         self.pending = [i for i, r in enumerate(self.rows)
-                        if r[self.status_col] == STATUS_ND]
+                        if r[self.status_col] == STATUS_ND or
+                        (review and r[self.status_col] in (STATUS_TRUE, STATUS_TEST))]
         if not self.pending:
             QMessageBox.information(self, "Done", "No images with ND status to process.")
             sys.exit(0)
@@ -287,14 +341,14 @@ class MainWindow(QMainWindow):
         vlay.setContentsMargins(8, 8, 8, 4)
 
         # Canvas
-        self.view = PaintView()
+        self.view = PaintView(self.brush_types)
         vlay.addWidget(self.view, stretch=1)
 
         # Brush type
         row1 = QHBoxLayout()
         row1.addWidget(QLabel("Brush:"))
         self.brush_type_combo = QComboBox()
-        for btype, binfo in BRUSH_TYPES.items():
+        for btype, binfo in self.brush_types.items():
             self.brush_type_combo.addItem(binfo["display_name"], btype)
         self.brush_type_combo.currentIndexChanged.connect(self._on_brush_type)
         row1.addWidget(self.brush_type_combo)
@@ -324,8 +378,10 @@ class MainWindow(QMainWindow):
         self.btn_pass  = QPushButton("Skip (pass)")
         self.btn_test  = QPushButton("Save as Test")
         self.btn_true  = QPushButton("Save as True")
+        self.btn_undo = QPushButton("Undo (Ctrl+Z)")
+        self.btn_overlay = QPushButton("Overlay (Tab)")
         for btn in (self.btn_prev, self.btn_next, self.btn_clear,
-                    self.btn_pass, self.btn_test, self.btn_true):
+                    self.btn_undo, self.btn_overlay, self.btn_pass, self.btn_test, self.btn_true):
             row2.addWidget(btn)
         vlay.addLayout(row2)
 
@@ -335,6 +391,19 @@ class MainWindow(QMainWindow):
         self.btn_pass.clicked.connect(self._mark_pass)
         self.btn_test.clicked.connect(lambda: self._save(STATUS_TEST))
         self.btn_true.clicked.connect(lambda: self._save(STATUS_TRUE))
+        self.btn_undo.clicked.connect(self.view.undo)
+        self.btn_overlay.clicked.connect(self.view.toggle_overlay)
+        self.shortcuts = []
+        actions = {"Ctrl+Z": self.view.undo, "Tab": self.view.toggle_overlay,
+                   "Ctrl+S": lambda: self._save(STATUS_TRUE),
+                   "1": lambda: self.brush_type_combo.setCurrentIndex(0),
+                   "2": lambda: self.brush_type_combo.setCurrentIndex(1),
+                   "E": lambda: self.brush_type_combo.setCurrentIndex(
+                       self.brush_type_combo.findData("erase"))}
+        for key, action in actions.items():
+            shortcut = QShortcut(QKeySequence(key), self)
+            shortcut.activated.connect(action)
+            self.shortcuts.append(shortcut)
 
         # Status + log
         self.status_label = QLabel()
@@ -348,8 +417,8 @@ class MainWindow(QMainWindow):
         vlay.addWidget(self.log_area)
 
         help_lbl = QLabel(
-            "Left-click drag to draw  |  Clear: erase all  |  "
-            "Save as Test/True: save mask + advance  |  Skip: mark pass + advance")
+            "1/2: brushes | E: erase | Ctrl+Z: undo (20 strokes) | Tab: overlay | "
+            "Ctrl+S: confirm + save | Save before Previous/Next; Skip excludes uncertain frames")
         help_lbl.setStyleSheet("color: #666; padding: 2px;")
         help_lbl.setWordWrap(True)
         vlay.addWidget(help_lbl)
@@ -358,10 +427,10 @@ class MainWindow(QMainWindow):
 
     def _on_brush_type(self, index):
         btype = self.brush_type_combo.itemData(index)
-        if btype and btype in BRUSH_TYPES:
+        if btype and btype in self.brush_types:
             self.view.set_brush_type(btype)
-            self.log(f"Brush: {BRUSH_TYPES[btype]['display_name']} "
-                     f"(pixel={BRUSH_TYPES[btype]['pixel_value']})")
+            self.log(f"Brush: {self.brush_types[btype]['display_name']} "
+                     f"(pixel={self.brush_types[btype]['pixel_value']})")
 
     def log(self, msg):
         ts = datetime.now().strftime("%H:%M:%S")
@@ -385,8 +454,17 @@ class MainWindow(QMainWindow):
 
         self.current_path = p
         self.view.load_image(p)
+        mask_path = row.get('mask_path') or row.get('suggestion_path')
+        if mask_path:
+            self.view.load_mask(Path(mask_path))
+            self.log("Loaded reviewed mask" if row.get('mask_path') else
+                     "Loaded v10 suggestion — check BOTH vein and artery before saving")
         self.status_label.setText(
-            f"[{self.cur + 1}/{len(self.pending)}]  {p.name}  —  {row[self.status_col]}")
+            f"[{self.cur + 1}/{len(self.pending)}]  {p.name}  —  {row[self.status_col]}  "
+            f"{row.get('split', '')}")
+        if self.is_pmc:
+            self.btn_test.setEnabled(row.get('split') == 'test')
+            self.btn_true.setText("Confirm BOTH A/V + Save")
         self.log(f"Loaded: {p.name}")
 
         self.btn_prev.setEnabled(self.cur > 0)
@@ -460,10 +538,12 @@ class MainWindow(QMainWindow):
         self.load_current()
 
     def _write_csv(self):
-        with open(self.dataInfo.meta_file, 'w', newline='', encoding='utf-8') as f:
+        tmp = self.dataInfo.meta_file.with_suffix('.csv.tmp')
+        with open(tmp, 'w', newline='', encoding='utf-8') as f:
             writer = csv.DictWriter(f, fieldnames=self.fieldnames)
             writer.writeheader()
             writer.writerows(self.rows)
+        tmp.replace(self.dataInfo.meta_file)
 
 
 if __name__ == "__main__":
@@ -471,10 +551,11 @@ if __name__ == "__main__":
     parser.add_argument("test_name", nargs="?", default="phantom_taobao",
                         help="Dataset name (e.g. phantom_taobao, customer_3d_phantom)")
     parser.add_argument("test_id", nargs="?", default="1", help="Test ID")
+    parser.add_argument("--review", action="store_true", help="Also revisit saved masks")
     args = parser.parse_args()
 
     app = QApplication(sys.argv)
-    win = MainWindow(test_name=args.test_name, test_id=args.test_id)
+    win = MainWindow(test_name=args.test_name, test_id=args.test_id, review=args.review)
     win.resize(1200, 800)
     win.show()
     sys.exit(app.exec())

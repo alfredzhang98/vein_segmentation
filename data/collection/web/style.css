@@ -1,0 +1,43 @@
+:root { color-scheme: dark; font-family: system-ui, sans-serif; background: #10151d; color: #e6edf5; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+header { padding: 18px 24px; border-bottom: 1px solid #303d50; display:flex; justify-content:space-between; align-items:center; }
+h1 { font-size: 21px; display: inline; margin-right: 20px; }
+main { display: grid; grid-template-columns: 260px minmax(0, 1fr); min-height: calc(100vh - 75px); }
+aside { padding: 18px; border-right: 1px solid #303d50; }
+aside label { display: block; }
+aside select { width: 100%; margin: 10px 0; }
+#frames { height: 48vh; font-size: 12px; }
+#frames option { padding: 8px 3px; }
+button, select { background: #202b3b; color: inherit; border: 1px solid #46556d; border-radius: 5px; padding: 8px 11px; }
+button { cursor: pointer; }
+button:hover { background: #33445e; }
+button:disabled { opacity: .4; cursor: default; }
+button.active { border: 2px solid #78b7ff; background: #344a63; }
+button.primary { background: #236947; border-color: #5dba84; }
+button.primary:hover { background: #308b60; }
+button.danger { background: #642e35; border-color: #da7c84; }
+button.danger:hover { background: #853942; }
+[hidden] { display: none !important; }
+.quality-actions { margin-top: 10px; }
+#qualityInfo { color: #ffca92; font-size: 14px; }
+button:focus-visible, select:focus-visible { outline: 2px solid #a8d0ff; }
+.pair, .toolbar, footer { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
+.pair button { flex:1; }
+.workspace { padding: 18px 24px; min-width: 0; }
+.toolbar { margin-bottom: 12px; }
+.toolbar label { display: inline-flex; align-items:center; gap: 6px; font-size: 13px; }
+#brushes { display: flex; gap: 8px; }
+input[type=range] { width: 100px; }
+.secondary { color: #afbed1; }
+#viewport { background: #05080c; height: 60vh; min-height: 320px; overflow:auto; position:relative; border:1px solid #303d50; }
+canvas { display: block; touch-action: none; cursor: crosshair; }
+canvas[hidden] { display:none; }
+#empty { padding:50px; color:#a9bad0; text-align:center; }
+#frameInfo { overflow-wrap: anywhere; margin: 10px 0; color: #b9cada; font-size:13px; }
+footer { padding: 6px 0; }
+#dirty { color:#ffd88e; font-size:13px; }
+#message { min-height: 24px; padding-top:8px; color:#a9e4bd; overflow-wrap:anywhere; }
+#message.error { color:#ff9a9a; }
+.muted { font-size:12px; color:#a4b4c9; line-height:1.8; }
+@media (max-width: 850px) { main { grid-template-columns: 180px minmax(0, 1fr); } .workspace { padding:12px; } aside { padding:10px; } }

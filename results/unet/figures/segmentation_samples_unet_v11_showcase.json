@@ -1,0 +1,104 @@
+{
+  "checkpoint": "models/unet/checkpoints/unet_v11.pth",
+  "split": "test",
+  "seed": 42,
+  "samples_per_dataset": 2,
+  "postprocessing": {
+    "policy": "joint",
+    "min_area": 4,
+    "closing_radius": 2,
+    "fill_holes": true,
+    "dominance": 0.6
+  },
+  "selection": "explicit diverse high-Dice showcase for named datasets; remaining rows fixed seed",
+  "showcase_datasets": [
+    "musv",
+    "mendeley",
+    "pmc9883282"
+  ],
+  "showcase_policy": {
+    "min_class_dice": 0.9,
+    "first": "maximum weakest-class Dice, then mean Dice, then index",
+    "subsequent": "maximize minimum distance to selected examples",
+    "distance": "0.45 * mean class-mask Dice distance + 0.45 * mean relative class-area difference + 0.10 * normalized 32x32 image RMSE",
+    "note": "Curated success examples, not representative test-set performance"
+  },
+  "samples": [
+    {
+      "dataset": "musv",
+      "cache_index": 335,
+      "label_mode": "full3",
+      "selection": "diverse_high_dice_showcase",
+      "dice": {
+        "vein": 0.9558441558441558,
+        "artery": 0.9553197702715857
+      }
+    },
+    {
+      "dataset": "musv",
+      "cache_index": 15,
+      "label_mode": "full3",
+      "selection": "diverse_high_dice_showcase",
+      "dice": {
+        "vein": 0.9383732901897338,
+        "artery": 0.9353366079167871
+      }
+    },
+    {
+      "dataset": "mendeley",
+      "cache_index": 17,
+      "label_mode": "artery",
+      "selection": "diverse_high_dice_showcase",
+      "dice": {
+        "artery": 0.9821092278719398
+      }
+    },
+    {
+      "dataset": "mendeley",
+      "cache_index": 79,
+      "label_mode": "artery",
+      "selection": "diverse_high_dice_showcase",
+      "dice": {
+        "artery": 0.968212389380531
+      }
+    },
+    {
+      "dataset": "pmc9883282",
+      "cache_index": 13,
+      "label_mode": "full3",
+      "selection": "diverse_high_dice_showcase",
+      "dice": {
+        "vein": 0.96600172310955,
+        "artery": 0.9670479767799215
+      }
+    },
+    {
+      "dataset": "pmc9883282",
+      "cache_index": 19,
+      "label_mode": "full3",
+      "selection": "diverse_high_dice_showcase",
+      "dice": {
+        "vein": 0.920266836086404,
+        "artery": 0.9645626779228429
+      }
+    },
+    {
+      "dataset": "customer_3d_phantom",
+      "cache_index": 2,
+      "label_mode": "vessel",
+      "selection": "fixed_seed",
+      "dice": {
+        "vessel": 0.974043485589078
+      }
+    },
+    {
+      "dataset": "customer_3d_phantom",
+      "cache_index": 4,
+      "label_mode": "vessel",
+      "selection": "fixed_seed",
+      "dice": {
+        "vessel": 0.9719102973622683
+      }
+    }
+  ]
+}

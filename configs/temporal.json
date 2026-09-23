@@ -1,0 +1,16 @@
+{
+  "seed": 42,
+  "cache": "/tmp/uceeqz4_stage1_20260923",
+  "init_checkpoint": "models/unet/checkpoints/unet_v11.pth",
+  "run_dir": "results/temporal/runs/convgru_20260923/training",
+  "hidden": 64,
+  "backbone_lr": 1e-05,
+  "temporal_lr": 0.0001,
+  "epochs": 12,
+  "min_epochs": 6,
+  "patience": 5,
+  "batch_size": 2,
+  "clips_per_epoch": 360,
+  "freeze_unet": true,
+  "dense_clips_only": true
+}

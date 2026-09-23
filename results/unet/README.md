@@ -1,5 +1,7 @@
 # U-Net — results, experiment log and paper material
 
+> Current results: [baseline comparison summary](BASELINE_COMPARISON_CN.md), including final metrics, postprocessing, limitations and reproduction commands. Git retains the summary and generation code; images, HTML and detailed CSV/JSON go under ignored `generated/`. Pre-existing results below remain historical v10 results.
+
 > 中文版：[README_CN.md](README_CN.md)
 
 This file merges what used to be `EXPERIMENTS.md` (experiment design and log) and
@@ -113,7 +115,7 @@ morphological open/close + hole filling. Identical to the deployed post-processi
 Reproduce:
 
 ```bash
-python models/unet/test.py --ckpt models/unet/checkpoints/unet_v10.pth \
+python models/unet/evaluate.py --ckpt models/unet/checkpoints/unet_v10.pth \
        --dataset musv mendeley customer_3d_phantom phantom_taobao --min-area 150
 ```
 
@@ -363,7 +365,7 @@ To run (after editing [`.env`](../../.env)):
 
 ```bash
 python models/unet/train.py
-python models/unet/test.py --ckpt models/unet/checkpoints/<best>.pth \
+python models/unet/evaluate.py --ckpt models/unet/checkpoints/<best>.pth \
        --dataset phantom_taobao --no-save
 ```
 
@@ -650,17 +652,17 @@ The scripts in this directory. Run all of them from the repository root.
 
 | Script | Output | Notes |
 |---|---|---|
-| [`plot_segmentation_samples.py`](plot_segmentation_samples.py) | `figures/segmentation_samples.{svg,pdf,png}` | **The paper's qualitative figure.** One row per domain; the palette encodes *which vessel*, not *right vs wrong* |
+| [`plot_segmentation_samples.py`](plot_segmentation_samples.py) | `figures/segmentation_samples_<checkpoint>.png` | **Five-domain qualitative figure.** One row per dataset with final joint postprocessing. Checkpoint-named output; existing files are never overwritten. |
 | [`plot_results.py`](plot_results.py) | `figures/exp_results.{pdf,svg,png}` | Grouped bar chart of Exp-A..E. **Note: this plots the stage-1 binary experiments of §3.1**, not the current 3-class model |
 | [`figure_style.py`](figure_style.py) | — | Shared matplotlib styling; produces no figure of its own. Imported by both scripts above |
 
 ```bash
 # The paper's qualitative figure
 python results/unet/plot_segmentation_samples.py \
-       --ckpt models/unet/checkpoints/unet_v10.pth \
-       --n 2 --seed-phantom 41 --seed-musv 13 --seed-cca 116
+       --ckpt models/unet/checkpoints/unet_v11.pth \
+       --n 2 --seed 42
 
-# Add --preview while hunting for seeds: PNG only at 150 dpi, ~5x faster
+# Default: PNG at 200 dpi. --preview: 150 dpi; --formats png pdf svg: optional export formats.
 ```
 
 `FigureConfig` in `figure_style.py` has three presets: the default (large type, still
@@ -668,3 +670,19 @@ legible after IEEE two-column downscaling), `ieee_strict()` (8–10 pt, for alre
 layout) and `presentation()` (slides / posters). Every figure is authored at 12.0" width
 and scaled to the paper column by the same factor, so the text in all of them prints at
 the same physical size — do not change one figure's width on its own.
+
+## Training monitoring
+
+The standard-library-only `models/unet/monitor.py` polls a training PID, its GPU allocation and checkpoint updates every 60 seconds. It exits when the training process ends and never modifies or restarts training.
+
+```bash
+python -u models/unet/monitor.py --pid <training-PID> \
+  --checkpoint-dir models/unet/checkpoints/<version> \
+  --train-log results/unet/runs/<run-name>/train.log
+```
+
+Training and its background monitor have ended; historical records are in `results/unet/runs/unet_v11_balanced/monitor.log` with `tail -f`. This run's `tee` has no training log open, so batch progress, losses and the exit reason were available only in the original terminal; the user confirmed successful early stopping at epoch 62. A checkpoint's epoch is the best saved epoch, not necessarily the current epoch. For future runs, create the log directory first and verify that `tee` opens its output successfully.
+
+Outputs default to `segmentation_samples_<checkpoint>.png` with a JSON manifest of cache indices and per-image scores. Use `--datasets`, `--n`, `--seed` or a new `--out` prefix. All five datasets are included by default, preferring labelled visible vessels without consulting predictions. Existing outputs are rejected. New checkpoint-named artifacts are Git-ignored except the retained final `segmentation_samples_unet_v11_showcase.png/.json`; historical `segmentation_samples.png/.svg` remain intact.
+
+Use `--datasets musv mendeley pmc9883282 customer_3d_phantom --n 2 --showcase-datasets musv mendeley pmc9883282 --showcase-min-dice 0.90 --out results/unet/figures/segmentation_samples_unet_v11_showcase` for diverse success examples in those three domains, requiring each labelled class Dice ≥0.90. Select the strongest first example, then maximize distance based on 45% class-mask Dice distance, 45% relative class-area difference and 10% normalized 32×32 image RMSE. This selection is disclosed here and in the JSON manifest; it does not imply different subjects. The layout matches historical `segmentation_samples`, without an added title or footer; retain this selection disclosure when reusing the figure. Phantom rows retain fixed-seed selection. Original figures and full-test metrics remain unchanged.

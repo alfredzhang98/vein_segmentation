@@ -1,6 +1,6 @@
 """
 infer.py — deployment inference. Self-contained: only torch / numpy / cv2
-plus `model.py`, so it can be copied into the robot project as-is.
+plus `model.py` / `postprocess.py`, which must accompany deployment copies.
 
 WHAT THE OLD VERSION GOT WRONG
 ------------------------------
@@ -55,8 +55,10 @@ import torch.nn.functional as F
 
 try:
     from .model import UNet
+    from .postprocess import clean_binary, clean_labels, av_outputs
 except ImportError:
     from model import UNet
+    from postprocess import clean_binary, clean_labels, av_outputs
 
 BG, VEIN, ARTERY = 0, 1, 2
 CLASS_NAME = {VEIN: "vein", ARTERY: "artery"}
@@ -113,32 +115,6 @@ def fit(img, mask, target_hw, mode="croppad"):
                                sy=sy, sx=sx, dy=dy, dx=dx, ch=ch, cw=cw)
 
 
-def _fill_holes(b):
-    """
-    Fill interior holes in a binary mask. cv2-only on purpose: this file gets copied
-    into the robot project with nothing beyond torch/numpy/cv2 available, so it cannot
-    reach for scipy.ndimage.binary_fill_holes the way test.py does.
-
-    Flood the background inward from outside; any background the flood cannot reach is
-    enclosed by foreground, i.e. a hole.
-
-    The 1-px pad is load-bearing, not defensive. Seeding the flood at (0, 0) of the
-    raw mask assumes that pixel is background — and a vessel touching the frame corner
-    makes it foreground, at which point the flood runs through the VESSEL instead and
-    the hole survives untouched. Verified against scipy: without the pad, 167 of 300
-    random cases disagreed, and a bordering 30x30 square with a 100-px hole came back
-    at 800 px instead of 900. Padding guarantees the flood a path all the way around.
-    """
-    h, w = b.shape
-    padded = np.zeros((h + 2, w + 2), np.uint8)
-    padded[1:-1, 1:-1] = b
-    inv = (padded == 0).astype(np.uint8)          # 1 = background (outer + holes)
-    ffm = np.zeros((h + 4, w + 4), np.uint8)      # floodFill wants a mask 2 px larger
-    cv2.floodFill(inv, ffm, (0, 0), 0)            # outer background -> 0
-    holes = inv[1:-1, 1:-1].astype(bool)          # still 1 => enclosed => a hole
-    return (b.astype(bool) | holes).astype(np.uint8)
-
-
 def unfit_mask(mask_fit, p):
     """Model-input grid -> crop-frame grid. Exact inverse of fit()."""
     scaled = np.zeros((p["nh"], p["nw"]), dtype=mask_fit.dtype)
@@ -177,7 +153,8 @@ class UNetInferencer:
     # -- core -----------------------------------------------------------------
 
     @torch.inference_mode()
-    def predict(self, crop_frame, threshold=0.5, return_prob=False):
+    def predict(self, crop_frame, threshold=0.5, return_prob=False,
+                postprocess=True, min_area=4, closing_radius=2, fill_holes=True):
         """
         crop_frame : grayscale uint8 (H, W) — ALREADY cropped by depth setting
                      (crop_by_depth), i.e. the frame mm_per_px is calibrated for.
@@ -186,7 +163,10 @@ class UNetInferencer:
         directly with no correction factor:
             3-class model -> uint8 ids  {0 bg, 1 vein, 2 artery}
             binary  model -> uint8      {0, 1}   (vessel, type unknown)
-        With return_prob=True, returns float32 vessel probability instead (p1+p2 for
+        Defaults: joint class repair, min_area=4, closing_radius=2, enclosed-hole filling.
+        No opening is used; set min_area=1 for targets below four pixels.
+        Set postprocess=False for raw masks. min_area is in crop-frame pixels.
+        With return_prob=True, cleanup is bypassed; returns float32 vessel probability (p1+p2 for
         the 3-class model), same grid.
         """
         if crop_frame.ndim == 3:
@@ -224,52 +204,26 @@ class UNetInferencer:
             # unfit_mask is nearest-neighbour; fine for a probability map too, and in
             # croppad mode it is a pure offset anyway.
             return unfit_mask(out.astype(np.float32), params)
-        return unfit_mask(out.astype(np.uint8), params)
+        mask = unfit_mask(out.astype(np.uint8), params)
+        return clean_labels(mask, min_area=min_area, closing_radius=closing_radius,
+                            fill_holes=fill_holes) if postprocess else mask
 
     # -- geometry -------------------------------------------------------------
 
     @staticmethod
-    def clean(binary, min_area=300):
-        """
-        Open, close, FILL HOLES, keep the largest connected component.
+    def clean(binary, min_area=1):
+        """Keep at most one region without eroding lines or expanding boundaries."""
+        return clean_binary(binary, min_area=min_area)
 
-        The hole fill is not cosmetic — it feeds radius_mm. close(5) only bridges gaps
-        up to about its kernel, so a larger hole punched through a predicted lumen
-        survived, and every hole subtracts from area_px:
+    def predict_regions(self, crop_frame, min_area=4, closing_radius=2, fill_holes=True):
+        """Return A/V masks, their union, and non-overlapping RGB display layers."""
+        if self.n_classes != 3:
+            raise ValueError("A/V output requires a three-class checkpoint")
+        raw = self.predict(crop_frame, postprocess=False)
+        return av_outputs(raw == VEIN, raw == ARTERY, min_area=min_area,
+                          closing_radius=closing_radius, fill_holes=fill_holes)
 
-            radius_mm = sqrt(area_px / pi) * mm_per_px
-
-        Measured on Mus-V test with the v3 model: 7.8% of predicted VEINS contain a
-        hole, and they under-report the radius by a median of 1.0% and up to 9.1%.
-        That is a needle target, so it matters. (The artery is barely affected at 0.6%
-        of frames, and the phantom has no holes at all — this is a human-imaging fix.)
-
-        It is close to free, though not because the ground truth is hole-free — 113 of
-        7166 ground-truth vessel regions (1.6%) do contain one, so an earlier claim of
-        "zero" here was wrong; it had only checked the test splits. The real argument
-        is that every one of those holes is annotation noise: the largest in the whole
-        project is 68 px (median 11), against a smallest true vein of 232 px, and 106
-        of the 113 sit in Mus-V's TRAINING vein masks, which inference never sees. Of
-        the 2134 held-out regions, exactly one has a hole. A lumen is anechoic; there
-        is no structure inside one for the fill to destroy.
-        """
-        b = (binary > 0).astype(np.uint8)
-        if not b.any():
-            return b.astype(bool)
-        k3 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-        k5 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
-        b = cv2.morphologyEx(b, cv2.MORPH_OPEN, k3)
-        b = cv2.morphologyEx(b, cv2.MORPH_CLOSE, k5)
-        b = _fill_holes(b)
-        n, lab, stats, _ = cv2.connectedComponentsWithStats(b, connectivity=8)
-        if n <= 1:
-            return np.zeros_like(b, dtype=bool)
-        i = 1 + int(np.argmax(stats[1:, cv2.CC_STAT_AREA]))
-        if stats[i, cv2.CC_STAT_AREA] < min_area:
-            return np.zeros_like(b, dtype=bool)
-        return lab == i
-
-    def measure(self, mask_crop, mm_per_px, axis_x=None, skin_row=0, min_area=300):
+    def measure(self, mask_crop, mm_per_px, axis_x=None, skin_row=0, min_area=1):
         """
         Geometry in the CROP frame — the coordinate system mm_per_px is defined in.
 

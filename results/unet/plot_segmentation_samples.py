@@ -1,40 +1,14 @@
-"""
-Qualitative segmentation figure for the 3-class partial-label model (RA-L).
+"""Five-domain qualitative figure using the shared final postprocessing.
 
-This replaces an earlier binary-only script, deleted along with the binary model.
-That one called torch.sigmoid() on a 1-channel logit and thresholded at 0.5, so it
-could not run the 3-class model at all, and its palette (green = GT, coral =
-prediction) encoded "truth vs prediction" — the wrong axis. The interesting axis is
-WHICH VESSEL, and what each dataset's labels are even able to claim.
+Run from vein_segmentation/ with downloaded data and prepared test caches:
+  python results/unet/plot_segmentation_samples.py --ckpt models/unet/checkpoints/unet_v11.pth
 
-WHAT THIS FIGURE HAS TO SAY
----------------------------
-One model, three label semantics. The columns are the same everywhere, but the
-meaning of a colour depends on what the dataset knows:
-
-  Mus-V     (full3)   Both vessels labelled  -> red artery + blue vein.
-  Phantom   (vessel)  "There is a tube here", type unknown -> ONE green region.
-                      The vein/artery split is not merely unlabelled here, it is
-                      MEANINGLESS: the loss constrains only p1+p2, so the model is
-                      free to scatter red/blue across the tube — and it does (median
-                      4 vein pieces + 2 artery pieces on phantom_taobao, while the
-                      merged foreground is a single blob). Drawing that confetti
-                      would advertise an opinion the model was never asked for.
-  Mendeley  (artery)  Only the common carotid is labelled. The jugular vein is in
-                      frame and UNLABELLED, so any red in that panel is an
-                      unsupervised bonus, not an error. This is the generalisation
-                      story, and the figure should show it rather than hide it.
-
-Green never shares a panel with red/blue (green is phantom-only, red/blue are
-human-only), so the only two colours ever seen together are red and blue — which
-stays legible under deuteranopia. Domain bands are neutral slate on purpose: the
-old figure used blue/coral for DOMAIN, and reusing them here would collide with
-red/blue meaning ARTERY/VEIN.
-
-Usage:
-  python results/unet/plot_segmentation_samples.py --ckpt models/unet/checkpoints/unet_v10.pth
+Defaults to two visible test frames per dataset, chosen with a fixed seed without
+looking at model predictions. This is an illustration, not a dataset-level metric.
+Generated previews stay local except the explicitly retained final showcase PNG/JSON.
 """
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -56,8 +30,8 @@ import torch
 import torch.nn.functional as F
 
 from data.pipeline.dataPrepare import (ReadDataset, CLASS_BG, CLASS_VEIN,
-                                       CLASS_ARTERY, CLASS_VESSEL)
-from models.unet.test import clean_binary                      # deployment post-processing, verbatim
+                                       CLASS_ARTERY, CLASS_VESSEL, DATASET_CONFIGS, check_stale)
+from models.unet.postprocess import clean_labels, complete_region
 from models.unet.model import UNet
 from figure_style import FigureConfig
 
@@ -93,7 +67,7 @@ def load_model(ckpt_path, device):
                  bilinear=bool(cfg.get("bilinear", False)),
                  base_ch=int(cfg.get("base_ch", 64)))
     model.load_state_dict(ck["model"])
-    model.to(device).eval()
+    model.to(device, memory_format=torch.channels_last).eval()
     n_par = sum(p.numel() for p in model.parameters())
     print(f"Loaded {Path(ckpt_path).name}: n_classes={n_classes} "
           f"base_ch={cfg.get('base_ch', 64)} ({n_par/1e6:.1f}M params) "
@@ -102,33 +76,26 @@ def load_model(ckpt_path, device):
 
 
 @torch.no_grad()
-def predict(model, img_t, device, mode, min_area, max_dist):
+def predict(model, img_t, device, mode, min_area):
     """
     Returns a mask in the SHARED id space, post-processed as deployment does — which
-    means keep_largest: one closed region per class, since each class IS one vessel
+    means keep_largest: at most one region per class for this task
     (see clean_binary). A figure showing a class split across two blobs would be
     advertising a mask whose centroid the geometry stage cannot use.
     """
-    logits = model(img_t.unsqueeze(0).to(device))
+    with torch.autocast(device.type, enabled=device.type == "cuda"):
+        logits = model(img_t.unsqueeze(0).to(device, memory_format=torch.channels_last))
     pred = F.softmax(logits.float(), 1).argmax(1)[0].cpu().numpy().astype(np.uint8)
 
     if mode == "vessel":
         # Merge first, then clean as ONE region — a phantom has exactly one tube, and
         # its vein/artery split carries no information. This mirrors the deployed
         # binary path: (p1 + p2) > thr -> clean.
-        fg = clean_binary((pred == CLASS_VEIN) | (pred == CLASS_ARTERY),
-                          min_area=min_area, max_dist=max_dist)
+        fg = complete_region((pred == CLASS_VEIN) | (pred == CLASS_ARTERY),
+                             min_area=min_area)
         return np.where(fg, CLASS_VESSEL, CLASS_BG).astype(np.uint8)
 
-    # Human frames hold TWO distinct vessels, so clean per class and reassemble by
-    # assignment. `v * 1 + a * 2` would sum an overlap into id 3 and invent a phantom
-    # class in a Mus-V panel; clean_binary's morphological CLOSE makes that overlap real.
-    v = clean_binary(pred == CLASS_VEIN,   min_area=min_area, max_dist=max_dist)
-    a = clean_binary(pred == CLASS_ARTERY, min_area=min_area, max_dist=max_dist)
-    out = np.zeros_like(pred)
-    out[v] = CLASS_VEIN
-    out[a] = CLASS_ARTERY          # artery wins ties: it is the better-segmented class
-    return out
+    return clean_labels(pred, min_area=min_area)
 
 
 def dice(pred_bin, gt_bin):
@@ -205,10 +172,9 @@ def normalize_display(img):
 
 def pick_samples(ds, n, seed, mode):
     """
-    Prefer frames that actually show what the panel is meant to demonstrate: for
-    Mus-V that means BOTH vessels present, otherwise a random draw can hand back a
-    frame whose vein is collapsed to zero area (7.5% of val frames are) and the
-    figure would silently argue the model missed it.
+    Prefer frames with labelled foreground (both A/V for full3). Sample selection
+    uses only ground truth and a fixed seed, never prediction scores. Empty-frame
+    performance belongs in the complete evaluation, not this illustrative panel.
     """
     rng = np.random.default_rng(seed)
     order = rng.permutation(len(ds))
@@ -217,9 +183,9 @@ def pick_samples(ds, n, seed, mode):
         _, m, _ = ds[int(i)]
         m = m.squeeze(0).numpy()
         if mode == "full3":
-            ok = (m == CLASS_VEIN).sum() > 1500 and (m == CLASS_ARTERY).sum() > 1500
+            ok = (m == CLASS_VEIN).any() and (m == CLASS_ARTERY).any()
         else:
-            ok = (m > 0).sum() > 800
+            ok = (m > 0).any()
         (picked if ok else fallback).append(int(i))
         if len(picked) == n:
             break
@@ -227,29 +193,99 @@ def pick_samples(ds, n, seed, mode):
     out = []
     for i in idxs:
         img, msk, lm = ds[i]
-        out.append((img, msk.squeeze(0).numpy().astype(np.uint8), lm))
+        out.append((img, msk.squeeze(0).numpy().astype(np.uint8), i))
     return out
+
+
+
+def showcase_distance(left, right):
+    """Compare labelled geometry and low-resolution appearance in image coordinates."""
+    geometry = np.mean([1.0 - dice(a, b) for a, b in zip(left["masks"], right["masks"])])
+    appearance = float(np.sqrt(np.mean((left["thumbnail"] - right["thumbnail"]) ** 2)))
+    # Area separates expanded/compressed vessels even if positional displacement
+    # makes two otherwise similar frames have little mask overlap.
+    area = np.mean([abs(int(a.sum()) - int(b.sum())) / max(int(a.sum()), int(b.sum()), 1)
+                    for a, b in zip(left["masks"], right["masks"])])
+    return 0.45 * float(geometry) + 0.45 * float(area) + 0.10 * appearance
+
+
+def pick_showcase_samples(ds, n, model, device, min_area, min_dice):
+    """Select diverse success examples above an explicit weakest-class Dice floor.
+
+    First choose the best weakest-class Dice; subsequent choices maximize minimum
+    distance from selected frames. This is curated illustration, not test evaluation.
+    """
+    ranked = []
+    required = (CLASS_VEIN, CLASS_ARTERY) if ds.label_mode == "full3" else (
+        CLASS_ARTERY if ds.label_mode == "artery" else CLASS_VESSEL,)
+    for i in range(len(ds)):
+        img, mask, mode = ds[i]
+        gt = mask.squeeze(0).numpy().astype(np.uint8)
+        if not all((gt == c).any() for c in required):
+            continue
+        pred = predict(model, img, device, mode, min_area)
+        scores = dict(panel_scores(pred, gt, mode))
+        values = list(scores.values())
+        if min(values) < min_dice:
+            continue
+        ranked.append(dict(worst=min(values), mean=float(np.mean(values)), index=i,
+                           scores=scores, masks=[gt == c for c in required],
+                           thumbnail=cv2.resize(normalize_display(img.squeeze(0).numpy()),
+                                                (32, 32), interpolation=cv2.INTER_AREA)))
+    ranked.sort(key=lambda r: (-r["worst"], -r["mean"], r["index"]))
+    if len(ranked) < n:
+        raise ValueError(f"{ds.dataset_name}: only {len(ranked)} visible frames meet "
+                         f"all-class Dice >= {min_dice}; need {n}")
+    print(f"  Showcase pool: {ds.dataset_name} {len(ranked)} frames, Dice >= {min_dice}")
+    selected = [ranked.pop(0)]
+    while len(selected) < n:
+        best = max(range(len(ranked)), key=lambda k: (
+            min(showcase_distance(ranked[k], other) for other in selected),
+            ranked[k]["worst"], ranked[k]["mean"], -ranked[k]["index"]))
+        selected.append(ranked.pop(best))
+    samples = []
+    for candidate in selected:
+        i, scores = candidate["index"], candidate["scores"]
+        print(f"  Selected showcase: {ds.dataset_name} index={i} Dice={scores}")
+        img, mask, _ = ds[i]
+        samples.append((img, mask.squeeze(0).numpy().astype(np.uint8), i))
+    return samples
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--ckpt", required=True)
-    ap.add_argument("--n", type=int, default=2, help="每个域取几张")
-    ap.add_argument("--seed", type=int, default=42, help="全局 seed（三个域一起换）")
-    # Per-domain overrides: re-rolling one row should not disturb rows you already
-    # like. Leave unset and the domain keeps deriving from --seed as before.
-    ap.add_argument("--seed-musv",    type=int, default=None)
-    ap.add_argument("--seed-phantom", type=int, default=None)
-    ap.add_argument("--seed-cca",     type=int, default=None)
-    ap.add_argument("--min-area", type=int, default=150)
-    ap.add_argument("--max-dist", type=float, default=40.0)
-    ap.add_argument("--phantom", default="customer_3d_phantom",
-                    choices=["customer_3d_phantom", "phantom_taobao"])
-    ap.add_argument("--out", default="results/unet/figures/segmentation_samples")
-    ap.add_argument("--preview", action="store_true",
-                    help="挑 seed 用：只出 PNG、150 dpi，快 ~5 倍。定稿时不要加，"
-                         "默认会出 svg/pdf/png 三种、600 dpi")
+    ap.add_argument("--n", type=int, default=2, help="每个数据集取几张")
+    ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--datasets", nargs="+", choices=list(DATASET_CONFIGS),
+                    default=["musv", "mendeley", "pmc9883282", "phantom_taobao", "customer_3d_phantom"])
+    ap.add_argument("--showcase-datasets", nargs="+", default=[], choices=list(DATASET_CONFIGS),
+                    help="仅这些域按单帧Dice择优展示；其余域保持seed选帧，JSON记录择优规则")
+    ap.add_argument("--showcase-min-dice", type=float, default=0.90,
+                    help="展示候选每个已标注类别的最低Dice；在达标候选中选择差异大的样本")
+    ap.add_argument("--min-area", type=int, default=4)
+    ap.add_argument("--out", help="输出前缀；默认按checkpoint名称命名，不覆盖已有文件")
+    ap.add_argument("--formats", nargs="+", choices=["png", "pdf", "svg"], default=["png"])
+    ap.add_argument("--dpi", type=int, default=200)
+    ap.add_argument("--preview", action="store_true", help="仅PNG、150dpi快速预览")
     args = ap.parse_args()
+    args.out = args.out or f"results/unet/figures/segmentation_samples_{Path(args.ckpt).stem}"
+    formats = ["png"] if args.preview else args.formats
+    existing = [Path(str(args.out) + "." + ext) for ext in [*formats, "json"]
+                if Path(str(args.out) + "." + ext).exists()]
+    if existing:
+        ap.error("Output already exists; use a different --out prefix: " + str(existing[0]))
+
+    if not 0 <= args.showcase_min_dice <= 1:
+        ap.error("--showcase-min-dice must be between 0 and 1")
+    if args.n < 1 or args.dpi < 1 or args.min_area < 1:
+        ap.error("--n, --dpi and --min-area must be positive")
+    if len(set(args.datasets)) != len(args.datasets):
+        ap.error("Dataset names must be unique")
+    if not set(args.showcase_datasets) <= set(args.datasets):
+        ap.error("--showcase-datasets must be included in --datasets")
+    if check_stale(args.datasets):
+        ap.error("Data/cache missing or stale; follow data/README_CN.md before plotting")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, n_classes = load_model(args.ckpt, device)
@@ -258,31 +294,22 @@ def main():
                          f"这个 checkpoint 是 {n_classes} 类的旧二分类模型，"
                          "对应的绘图脚本已随二分类模型一并删除。")
 
-    # Phantom last, at the bottom: it is the deployment domain, so it reads as the
-    # figure's conclusion. Anatomical datasets (the auxiliary training domains) come
-    # first, phantom is where the guidance actually runs.
-    domains = [
-        ("musv",     "Mus-V",   "vein + artery"),
-        ("mendeley", "CCA",     "artery only"),
-        ("phantom",  "Phantom", "vessel only"),
-    ]
-    ds_name = {"musv": "musv", "phantom": args.phantom, "mendeley": "mendeley"}
-
-    seed_override = {"musv": args.seed_musv, "phantom": args.seed_phantom,
-                     "mendeley": args.seed_cca}
-
-    # Per-domain seed offset is keyed by domain NAME, not row position, so reordering
-    # the rows (e.g. moving phantom to the bottom) does not change which frames each
-    # domain samples. Row order and sample choice are independent knobs.
-    seed_offset = {"musv": 0, "mendeley": 37, "phantom": 74}
-
+    labels = {"musv": "Mus-V", "mendeley": "CCA", "pmc9883282": "PMC",
+              "phantom_taobao": "Taobao phantom", "customer_3d_phantom": "Phantom"}
+    offsets = {"musv": 0, "mendeley": 37, "pmc9883282": 111,
+               "phantom_taobao": 148, "customer_3d_phantom": 74}
+    domains = [(name, labels.get(name, name), "") for name in args.datasets]
     rows = []
     for dom, _, _ in domains:
-        ds = ReadDataset("test", 1, ds_name[dom])
-        seed = seed_override[dom] if seed_override[dom] is not None else args.seed + seed_offset[dom]
-        print(f"  {dom:9s} seed={seed}")
-        for s in pick_samples(ds, args.n, seed, ds.label_mode):
-            rows.append((dom, ds.label_mode, s))
+        ds = ReadDataset("test", 1, dom, augment=False)
+        if args.n > len(ds):
+            ap.error(f"{dom} only has {len(ds)} test frames; reduce --n")
+        seed = args.seed + offsets.get(dom, 0)
+        print(f"  {dom:20s} seed={seed}")
+        samples = (pick_showcase_samples(ds, args.n, model, device, args.min_area, args.showcase_min_dice)
+                   if dom in args.showcase_datasets else pick_samples(ds, args.n, seed, ds.label_mode))
+        for sample in samples:
+            rows.append((dom, ds.label_mode, sample))
 
     NC, NR = 4, len(rows)
 
@@ -311,8 +338,12 @@ def main():
     gs_main = gs_root[1].subgridspec(NR, NC, hspace=0.04, wspace=0.03)
     col_titles = ["Input", "Ground Truth", "Prediction", "GT vs. Pred"]
 
-    for r, (dom, mode, (img_t, gt, _)) in enumerate(rows):
-        pred = predict(model, img_t, device, mode, args.min_area, args.max_dist)
+    manifest = []
+    for r, (dom, mode, (img_t, gt, index)) in enumerate(rows):
+        pred = predict(model, img_t, device, mode, args.min_area)
+        manifest.append(dict(dataset=dom, cache_index=index, label_mode=mode,
+                             selection="diverse_high_dice_showcase" if dom in args.showcase_datasets else "fixed_seed",
+                             dice=dict(panel_scores(pred, gt, mode))))
         img = normalize_display(img_t.squeeze(0).numpy())
         border = DOMAIN_BAND_COLOR
 
@@ -367,13 +398,27 @@ def main():
                ncol=2, fontsize=18, frameon=True, edgecolor="#cccccc",
                fancybox=True, framealpha=0.6)
 
-    # Default = SVG only (vector, the paper format). Rendering PDF+PNG on top was the
-    # bulk of the wall-clock — data prep is only ~2 s. --preview drops to a quick 150-dpi
-    # PNG for eyeballing seeds; the SVG at 600 dpi is the deliverable.
-    fmts = ("png",) if args.preview else ("svg",)
-    dpi = 150 if args.preview else None
-    saved = FigureConfig.save(fig, args.out, formats=fmts, dpi=dpi)
+    # Match the historical figure layout; selection provenance stays in JSON
+    # and the accompanying README caption, not an extra title/footer.
+    fmts = ("png",) if args.preview else tuple(args.formats)
+    saved = FigureConfig.save(fig, args.out, formats=fmts, dpi=150 if args.preview else args.dpi)
+    manifest_path = Path(str(args.out) + ".json")
+    manifest_path.write_text(json.dumps(dict(checkpoint=str(args.ckpt), split="test",
+                             seed=args.seed, samples_per_dataset=args.n, postprocessing=dict(policy="joint", min_area=args.min_area,
+                             closing_radius=2, fill_holes=True, dominance=.6),
+                             selection=("explicit diverse high-Dice showcase for named datasets; remaining rows fixed seed"
+                                        if args.showcase_datasets else
+                                        "fixed seed, prefer labelled foreground; not selected by prediction quality"),
+                             showcase_datasets=args.showcase_datasets,
+                             showcase_policy=dict(min_class_dice=args.showcase_min_dice,
+                                 first="maximum weakest-class Dice, then mean Dice, then index",
+                                 subsequent="maximize minimum distance to selected examples",
+                                 distance="0.45 * mean class-mask Dice distance + 0.45 * mean relative class-area difference + 0.10 * normalized 32x32 image RMSE",
+                                 note="Curated success examples, not representative test-set performance"),
+                             samples=manifest), indent=2))
     print("Saved → " + "  +  ".join(str(p) for p in saved))
+    print("Sample indices and scores →", manifest_path)
+
 
 
 if __name__ == "__main__":
